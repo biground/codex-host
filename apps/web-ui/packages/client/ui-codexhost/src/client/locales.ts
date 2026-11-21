@@ -288,6 +288,10 @@ export const en = {
   "connectDevices.signOutDescription":
     "Signing back in needs the access token from the computer or another signed-in device. Other devices stay signed in.",
   "connectDevices.signOutConfirm": "Sign out",
+  "connectDevices.scopedTitle": "Scoped remote access",
+  "connectDevices.scopedDescription":
+    "This browser is signed in with a scoped access key. Access is limited to permitted projects and models, and device management settings are restricted to the primary key.",
+  "connectDevices.scopedKeyLabel": "Active key: {label}",
   "connectDevices.cancel": "Cancel",
   "connectDevices.close": "Close",
   "connectDevices.localListener":
@@ -758,6 +762,10 @@ export const zh: Record<ImportLocaleKey, string> = {
   "connectDevices.signOutDescription":
     "重新登录需要访问令牌，可从电脑或其他已登录设备获取。其他设备不受影响。",
   "connectDevices.signOutConfirm": "退出登录",
+  "connectDevices.scopedTitle": "次级权限远程访问",
+  "connectDevices.scopedDescription":
+    "当前浏览器使用受限次级访问密钥登录，仅可访问已授权的项目与指定模型；设备连接与全局管理功能仅对主密钥开放。",
+  "connectDevices.scopedKeyLabel": "当前密钥：{label}",
   "connectDevices.cancel": "取消",
   "connectDevices.close": "关闭",
   "connectDevices.localListener":

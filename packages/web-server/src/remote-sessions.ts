@@ -666,6 +666,7 @@ export class RemoteSessions {
     });
     streams.routeSessions(async (endpoint, args, sink, next) => {
       if (endpoint === "session/control") {
+        if (sink.auth?.scope === "scoped") return false;
         sink.onClose(() => this.controls.delete(sink));
         await next({
           ...sink,

@@ -3,6 +3,78 @@ import type { IncomingMessage, ServerResponse } from "node:http";
 import type { Duplex } from "node:stream";
 import type { ClientAssets, ClientSource } from "./client-assets.ts";
 
+export interface WebAccessAllowedModel {
+  readonly provider: string;
+  readonly model: string;
+}
+
+/** Enforcement policy returned by an auth/policy plugin for a scoped remote credential. */
+export interface WebAccessPolicy {
+  readonly credentialId: string;
+  readonly label?: string;
+  readonly allowedProjectPaths: readonly string[];
+  readonly allowedModels: readonly WebAccessAllowedModel[];
+  readonly allowWorkspaceFiles: boolean;
+  readonly allowTerminal: boolean;
+}
+
+export interface WebAccessResolvedToken {
+  readonly credentialId: string;
+  readonly policy: WebAccessPolicy;
+}
+
+export interface WebAccessPolicyProvider {
+  readonly id: string;
+  resolveToken(candidate: string): WebAccessResolvedToken | undefined;
+  getPolicy(credentialId: string): WebAccessPolicy | undefined;
+  hasCredential(credentialId: string): boolean;
+  listCredentialIds?(): readonly string[];
+}
+
+export interface WebAccessRequestIdentity {
+  readonly credential: string;
+  readonly local: boolean;
+  readonly scope: "full" | "scoped";
+  readonly policy?: WebAccessPolicy;
+}
+
+export interface WebAccessProjectSummary {
+  readonly workspaceId?: string;
+  readonly title: string;
+  readonly path: string;
+}
+
+export interface WebAccessModelSummary {
+  readonly id: string;
+  readonly name: string;
+  readonly description?: string;
+  readonly fastModel?: string;
+  readonly ultrafastModel?: string;
+}
+
+export interface WebAccessModelGroupSummary {
+  readonly id: string;
+  readonly name: string;
+  readonly models: readonly WebAccessModelSummary[];
+}
+
+export interface WebAccessNetworkUrl {
+  readonly kind: string;
+  readonly url: string;
+}
+
+/** Minimal Host service injected into trusted Web plugins as Cordis service `codexhostAccess`. */
+export interface WebAccessExtensionHost {
+  readonly authEnabled: boolean;
+  readonly dataDirectory: string;
+  registerProvider(provider: WebAccessPolicyProvider): () => void;
+  revokeCredential(credentialId: string): void;
+  getRequestAuth(request: IncomingMessage): WebAccessRequestIdentity | undefined;
+  listProjects(): Promise<readonly WebAccessProjectSummary[]>;
+  listModels(): Promise<readonly WebAccessModelGroupSummary[]>;
+  getNetworkUrls(): Promise<readonly WebAccessNetworkUrl[]>;
+}
+
 export interface WebPluginPackage {
   readonly id: string;
   readonly directory: string;

@@ -5,6 +5,7 @@ import { open, realpath, stat } from "node:fs/promises";
 import type { IncomingMessage, ServerResponse } from "node:http";
 import { basename, isAbsolute, resolve } from "node:path";
 import { pipeline } from "node:stream/promises";
+import { resolveContainedFilePath } from "./access-policy.ts";
 import { RpcError } from "./transport.ts";
 
 export async function openWorkspaceFile(
@@ -61,6 +62,7 @@ export async function downloadWorkspaceFile(
   response: ServerResponse,
   url: URL,
   workspace: (sessionId: string) => string | undefined,
+  options?: { allowedRoots?: readonly string[] },
 ): Promise<void> {
   response.setHeader("Cache-Control", "private, no-store");
   const root = workspace(url.searchParams.get("sessionId") ?? "");
@@ -69,10 +71,18 @@ export async function downloadWorkspaceFile(
     response.writeHead(404).end();
     return;
   }
+  const target =
+    options?.allowedRoots !== undefined
+      ? resolveContainedFilePath(root, path, options.allowedRoots)
+      : resolve(root, path);
+  if (target === undefined) {
+    response.writeHead(403, { "content-type": "text/plain" }).end("access denied");
+    return;
+  }
   let file;
   try {
-    // Match workspace preview: absolute paths may name files outside the cwd.
-    file = await open(resolve(root, path), constants.O_RDONLY | constants.O_NONBLOCK);
+    // Match workspace preview for full-access callers; scoped callers are confined above.
+    file = await open(target, constants.O_RDONLY | constants.O_NONBLOCK);
     const meta = await file.stat();
     if (!meta.isFile()) throw new Error("not a regular file");
     const name = basename(path);

@@ -210,20 +210,32 @@ async function captureOnce(
   }
 }
 
+export interface WebAccessAuthStatus {
+  authenticated: boolean;
+  local: boolean;
+  scope: "full" | "scoped";
+  label?: string;
+}
+
 /** The server's request-trust decision for the current session. */
-export async function readWebAccessAuth(
-  signal: AbortSignal,
-): Promise<{ authenticated: boolean; local: boolean }> {
+export async function readWebAccessAuth(signal: AbortSignal): Promise<WebAccessAuthStatus> {
   const response = await fetch("api/auth/status", {
     credentials: "same-origin",
     cache: "no-store",
     signal,
   });
-  if (!response.ok) return { authenticated: false, local: false };
-  const status = (await response.json()) as { authenticated?: unknown; local?: unknown };
+  if (!response.ok) return { authenticated: false, local: false, scope: "full" };
+  const status = (await response.json()) as {
+    authenticated?: unknown;
+    local?: unknown;
+    scope?: unknown;
+    label?: unknown;
+  };
   return {
     authenticated: status.authenticated === true,
     local: status.local === true,
+    scope: status.scope === "scoped" ? "scoped" : "full",
+    ...(typeof status.label === "string" && status.label ? { label: status.label } : {}),
   };
 }
 

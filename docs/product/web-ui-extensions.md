@@ -39,6 +39,7 @@ Web 设置中的「界面扩展」（Interface extensions）支持安装、启�
 
 - 原生 `ClientModules` 装配主客户端 JavaScript 和同目录的 `client.*.js` 分块，支持内嵌 CSS。图片、独立 HTML/JS/CSS、字体等由插件自己的 `webServer` 路由提供；不自动公开整个安装目录，也不按插件名添加资源映射。
 - 插件 HTTP 路由使用现有地址和认证；写请求及连接升级遵守同源约束。原包自行决定方法、状态、响应头和缓存语义。内置 API、连接通道、核心资源和恢复入口保持原归属，路由冲突明确失败。
+- Web 后端向可信插件暴露 `codexhostAccess` Cordis 服务，允许注册次级远程访问密钥的 `WebAccessPolicyProvider`、按请求识别主权限/次级权限（`getRequestAuth`）、吊销次级凭证连接与推送（`revokeCredential`），以及读取本机项目、模型目录和网络访问地址用于管理界面。权限策略由 `web-server` 统一强制执行（fail-closed）：次级密钥仅限访问授权项目目录与指定 `(Harness, Model)` 组合，文件读取与下载受 `realpath` 目录包含校验约束，终端及全局管理面（`/api/ch/v1/*`、界面扩展、设备连接、桌面截图、侧栏浏览器、全局设置等）默认拒绝；卸载或禁用提供者插件后次级凭证立即失效。仓库内 `plugins/web-scoped-access` 提供了可直接按本机目录安装的次级远程访问权限管理插件。
 - 外部插件与内置插件使用同一客户端启动图，并复用宿主的 React、Cordis 和插槽模块。外部包不能以相同模块身份替换内置模块。
 - 检查声明的客户端模块依赖、`engines.dsh` 和宿主运行时 peer 版本。源码模式读取实际构建依赖；发行包携带 `client-runtime-versions.json` 和共享 Web 运行模块，不以安装插件时下载的依赖树冒充宿主版本。安装包的框架导入指向嵌入宿主实例；发行目录移动后仍须保留其 `node_modules/`。缺失必需模块、版本冲突或无法确认的必需版本会阻止启用。
 - 客户端代码和 JavaScript 分块在插件装配时形成资源快照；Loader 增删通过 ClientModules 更新模块图，由官方 client-hmr 通知页面。开发构建变化沿用官方 bundle 监听，不提供 Node 模块代码替换或安装包原地升级。外置资源请求携带版本时，旧版本或未知版本返回未找到，避免旧页面缓存新版分块。

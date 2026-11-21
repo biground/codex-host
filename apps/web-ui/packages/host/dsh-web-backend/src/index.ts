@@ -11,8 +11,26 @@
  */
 import { stat } from "node:fs/promises";
 import { mountWebPlugins } from "./plugin-runtime.ts";
-import type { WebPluginRuntime, WebPluginRuntimeOptions } from "./plugin-types.ts";
-export type { WebPluginRuntime, WebPluginRuntimeOptions, WebPluginResult } from "./plugin-types.ts";
+import type {
+  WebAccessExtensionHost,
+  WebPluginRuntime,
+  WebPluginRuntimeOptions,
+} from "./plugin-types.ts";
+export type {
+  WebAccessAllowedModel,
+  WebAccessExtensionHost,
+  WebAccessModelGroupSummary,
+  WebAccessModelSummary,
+  WebAccessNetworkUrl,
+  WebAccessPolicy,
+  WebAccessPolicyProvider,
+  WebAccessProjectSummary,
+  WebAccessRequestIdentity,
+  WebAccessResolvedToken,
+  WebPluginRuntime,
+  WebPluginRuntimeOptions,
+  WebPluginResult,
+} from "./plugin-types.ts";
 import { Context } from "@deepseek-ai/cordis";
 import TypertGateway from "@deepseek-ai/dsh-api-gateway";
 import type { DshStreamInput } from "./stream-input.ts";
@@ -43,6 +61,8 @@ export interface DshWebBackendOptions {
   readonly threadWorkspace: (sessionId: string) => string | undefined;
   /** File access root for a local Thread or a workspace-bound draft; defaults to threadWorkspace. */
   readonly fileWorkspace?: (sessionId: string) => string | undefined;
+  /** Optional CodexHost access-policy extension port exposed to trusted Web plugins. */
+  readonly codexhostAccess?: WebAccessExtensionHost;
 }
 
 /** One Remote failure in the DSH wire vocabulary. */
@@ -208,6 +228,9 @@ export async function createDshWebBackend(options: DshWebBackendOptions): Promis
     ctx.typert.register(WorkspaceFilesTypert);
     ctx.typert.register(OfficeToPdfTypert);
     ctx.typert.register(TerminalTypert);
+    if (options.codexhostAccess !== undefined) {
+      ctx.provide("codexhostAccess", options.codexhostAccess);
+    }
   } catch (error) {
     await ctx.fiber.dispose().catch(() => undefined);
     throw error;
