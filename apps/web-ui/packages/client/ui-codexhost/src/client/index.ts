@@ -21,6 +21,7 @@ import {
   desktopScreenshotApi,
   handoffApi,
   queueMessageEditApi,
+  readWebAccessAuth,
   sentMessageEditApi,
   turnDiffsApi,
   voiceApi,
@@ -153,6 +154,27 @@ const HOST_SETTINGS_PAGES = [
 export function apply(ctx: ClientContext): void {
   ctx.effect(() => ctx.locale.register(NS, { zh, en }), "ui-codexhost: dictionaries");
   const t = ctx.locale.bind(NS);
+  const fullAccessDisposers: Array<() => void> = [];
+  let scopedSession = false;
+  const registerFullOnly = (mount: () => () => void): void => {
+    if (scopedSession) return;
+    const dispose = mount();
+    fullAccessDisposers.push(dispose);
+  };
+  ctx.effect(() => {
+    const controller = new AbortController();
+    void readWebAccessAuth(controller.signal)
+      .then((status) => {
+        if (controller.signal.aborted || status.scope !== "scoped") return;
+        scopedSession = true;
+        for (const dispose of fullAccessDisposers.splice(0)) dispose();
+      })
+      .catch(() => undefined);
+    return () => {
+      controller.abort();
+      for (const dispose of fullAccessDisposers.splice(0)) dispose();
+    };
+  }, "ui-codexhost: auth scope");
   ctx.slots.inject("sidebar.right.tab.document.actions", () =>
     ctx.slots.register(
       {
@@ -277,26 +299,30 @@ export function apply(ctx: ClientContext): void {
       drafts,
       registerSource: (source) => scope.inputTriggers.registerSource(source),
     };
-    scope.slots.inject("conversation.input.right", () =>
-      scope.slots.register(
-        {
-          name: "conversation.input.right",
-          id: "codexhost.desktop-screenshot",
-          locale: NS,
-          inject: (): DesktopScreenshotButtonFace => screenshotButton,
-        },
-        DesktopScreenshotButton,
+    registerFullOnly(() =>
+      scope.slots.inject("conversation.input.right", () =>
+        scope.slots.register(
+          {
+            name: "conversation.input.right",
+            id: "codexhost.desktop-screenshot",
+            locale: NS,
+            inject: (): DesktopScreenshotButtonFace => screenshotButton,
+          },
+          DesktopScreenshotButton,
+        ),
       ),
     );
-    scope.slots.inject("conversation.input.notice", () =>
-      scope.slots.register(
-        {
-          name: "conversation.input.notice",
-          id: "codexhost.desktop-screenshot",
-          locale: NS,
-          inject: (): DesktopScreenshotFace => ({ screenshot, drafts }),
-        },
-        DesktopScreenshotPreview,
+    registerFullOnly(() =>
+      scope.slots.inject("conversation.input.notice", () =>
+        scope.slots.register(
+          {
+            name: "conversation.input.notice",
+            id: "codexhost.desktop-screenshot",
+            locale: NS,
+            inject: (): DesktopScreenshotFace => ({ screenshot, drafts }),
+          },
+          DesktopScreenshotPreview,
+        ),
       ),
     );
     const voice = new VoiceInput(voiceApi.transcribe);
@@ -405,55 +431,61 @@ export function apply(ctx: ClientContext): void {
       ctx.uiWorkspace.openSession(sessionId as SessionId);
     },
   };
-  ctx.slots.inject("main", () =>
-    ctx.slots.register(
-      {
-        name: "main",
-        key: PANEL_ID,
-        locale: NS,
-        inject: (): ImportPageFace => ({
-          openSession: async (threadId, signal) => {
-            const id = threadId as SessionId;
-            if (ctx.sessions.list.getSnapshot().byId[id] === undefined)
-              await ctx.sessions.loadSummary(id);
-            signal.throwIfAborted();
-            if (ctx.sessions.list.getSnapshot().byId[id] === undefined)
-              throw new Error(t("catalogPending"));
-            face.openSession(threadId);
-          },
-        }),
-      },
-      ImportPage,
+  registerFullOnly(() =>
+    ctx.slots.inject("main", () =>
+      ctx.slots.register(
+        {
+          name: "main",
+          key: PANEL_ID,
+          locale: NS,
+          inject: (): ImportPageFace => ({
+            openSession: async (threadId, signal) => {
+              const id = threadId as SessionId;
+              if (ctx.sessions.list.getSnapshot().byId[id] === undefined)
+                await ctx.sessions.loadSummary(id);
+              signal.throwIfAborted();
+              if (ctx.sessions.list.getSnapshot().byId[id] === undefined)
+                throw new Error(t("catalogPending"));
+              face.openSession(threadId);
+            },
+          }),
+        },
+        ImportPage,
+      ),
     ),
   );
-  ctx.slots.inject("sidebar.panellist", () =>
-    ctx.slots.register(
-      {
-        name: "sidebar.panellist",
-        id: PANEL_ID,
-        order: 10,
-        label: () => t("panel"),
-        locale: NS,
-      },
-      ImportIcon,
+  registerFullOnly(() =>
+    ctx.slots.inject("sidebar.panellist", () =>
+      ctx.slots.register(
+        {
+          name: "sidebar.panellist",
+          id: PANEL_ID,
+          order: 10,
+          label: () => t("panel"),
+          locale: NS,
+        },
+        ImportIcon,
+      ),
     ),
   );
   const { locale, colorScheme } = webExtensionAppearance(ctx);
   const plugins = createPluginsNavigation(document, () => ctx.layout.selectPanel(PLUGINS_PANEL_ID));
   ctx.effect(() => plugins.dispose, "ui-codexhost: plugin navigation snapshot");
-  ctx.slots.inject("sidebar.primary.action", () =>
-    ctx.slots.register(
-      {
-        name: "sidebar.primary.action",
-        id: PLUGINS_PANEL_ID,
-        order: 20,
-        locale: NS,
-        inject: (): PluginsActionFace => ({
-          openPlugins: () => ctx.layout.selectPanel(PLUGINS_PANEL_ID),
-          navigation: plugins,
-        }),
-      },
-      PluginsAction,
+  registerFullOnly(() =>
+    ctx.slots.inject("sidebar.primary.action", () =>
+      ctx.slots.register(
+        {
+          name: "sidebar.primary.action",
+          id: PLUGINS_PANEL_ID,
+          order: 20,
+          locale: NS,
+          inject: (): PluginsActionFace => ({
+            openPlugins: () => ctx.layout.selectPanel(PLUGINS_PANEL_ID),
+            navigation: plugins,
+          }),
+        },
+        PluginsAction,
+      ),
     ),
   );
   ctx.inject(["settingsNavigation"], (scope) => {
@@ -563,28 +595,33 @@ export function apply(ctx: ClientContext): void {
     ),
   );
 
-  ctx.slots.inject("main", () =>
-    ctx.slots.register(
-      {
-        name: "main",
-        key: PLUGINS_PANEL_ID,
-        locale: NS,
-        inject: (): PluginsSectionFace => ({ locale, colorScheme, navigation: plugins }),
-      },
-      PluginsSection,
+  // Local management entries stay visible to full-access remote users; scoped keys hide admin sections.
+  registerFullOnly(() =>
+    ctx.slots.inject("main", () =>
+      ctx.slots.register(
+        {
+          name: "main",
+          key: PLUGINS_PANEL_ID,
+          locale: NS,
+          inject: (): PluginsSectionFace => ({ locale, colorScheme, navigation: plugins }),
+        },
+        PluginsSection,
+      ),
     ),
   );
-  ctx.slots.inject("settings.section", () =>
-    ctx.slots.register(
-      {
-        name: "settings.section",
-        id: "codexhost-ui-extensions",
-        order: 6,
-        label: () => t("settings.extensions"),
-        locale: NS,
-        inject: () => ({ openWorkspace: () => plugins.open() }),
-      },
-      PluginsSettingsEntry,
+  registerFullOnly(() =>
+    ctx.slots.inject("settings.section", () =>
+      ctx.slots.register(
+        {
+          name: "settings.section",
+          id: "codexhost-ui-extensions",
+          order: 6,
+          label: () => t("settings.extensions"),
+          locale: NS,
+          inject: () => ({ openWorkspace: () => plugins.open() }),
+        },
+        PluginsSettingsEntry,
+      ),
     ),
   );
   ctx.slots.inject("settings.section", () =>
@@ -600,17 +637,19 @@ export function apply(ctx: ClientContext): void {
     ),
   );
   HOST_SETTINGS_PAGES.forEach(([pageId, label, order]) => {
-    ctx.slots.inject("settings.section", () =>
-      ctx.slots.register(
-        {
-          name: "settings.section",
-          id: `codexhost-${pageId}`,
-          order,
-          label: () => t(label),
-          locale: NS,
-          inject: (): HostSettingsSectionFace => ({ pageId, locale, colorScheme }),
-        },
-        HostSettingsSection,
+    registerFullOnly(() =>
+      ctx.slots.inject("settings.section", () =>
+        ctx.slots.register(
+          {
+            name: "settings.section",
+            id: `codexhost-${pageId}`,
+            order,
+            label: () => t(label),
+            locale: NS,
+            inject: (): HostSettingsSectionFace => ({ pageId, locale, colorScheme }),
+          },
+          HostSettingsSection,
+        ),
       ),
     );
   });

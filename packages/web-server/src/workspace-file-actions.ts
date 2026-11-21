@@ -6,6 +6,7 @@ import { open, realpath, stat } from "node:fs/promises";
 import type { IncomingMessage, ServerResponse } from "node:http";
 import { basename, isAbsolute, resolve } from "node:path";
 import { pipeline } from "node:stream/promises";
+import { resolveContainedFilePath } from "./access-policy.ts";
 import { RpcError } from "./transport.ts";
 
 const DOWNLOAD_TICKET_TTL_MS = 60_000;
@@ -159,6 +160,9 @@ export async function issueWorkspaceDownloadTicket(
   owner?: string,
   remote?: RemoteWorkspaceDownloadDelegate,
   request?: IncomingMessage,
+  authorize?: (
+    sessionId: string,
+  ) => Promise<{ allowed: true; allowedRoots?: readonly string[] } | { allowed: false }>,
 ): Promise<void> {
   response.setHeader("Cache-Control", "private, no-store");
   let sessionId = "";
@@ -171,7 +175,13 @@ export async function issueWorkspaceDownloadTicket(
     response.writeHead(400, { "content-type": "text/plain" }).end("invalid json");
     return;
   }
+  const access = authorize ? await authorize(sessionId) : { allowed: true as const };
+  if (!access.allowed) {
+    response.writeHead(403, { "content-type": "text/plain" }).end("access denied");
+    return;
+  }
   if (
+    access.allowedRoots === undefined &&
     remote &&
     (await remote.issueDownloadTicket(response, sessionId, path, tickets, owner, request))
   ) {
@@ -182,9 +192,17 @@ export async function issueWorkspaceDownloadTicket(
     response.writeHead(404).end();
     return;
   }
+  const target =
+    access.allowedRoots !== undefined
+      ? resolveContainedFilePath(root, path, access.allowedRoots)
+      : resolve(root, path);
+  if (target === undefined) {
+    response.writeHead(403, { "content-type": "text/plain" }).end("access denied");
+    return;
+  }
   let file;
   try {
-    file = await open(resolve(root, path), constants.O_RDONLY | constants.O_NONBLOCK);
+    file = await open(target, constants.O_RDONLY | constants.O_NONBLOCK);
     const meta = await file.stat();
     if (!meta.isFile()) throw new Error("not a regular file");
     const ticket = tickets.issue({
@@ -211,9 +229,14 @@ export async function downloadWorkspaceFile(
   workspace: (sessionId: string) => string | undefined,
   grant?: WorkspaceDownloadGrant,
   remote?: RemoteWorkspaceDownloadDelegate,
+  options?: { allowedRoots?: readonly string[] },
 ): Promise<void> {
   response.setHeader("Cache-Control", "private, no-store");
-  if (remote && (await remote.downloadFile(request, response, url, grant))) {
+  if (
+    options?.allowedRoots === undefined &&
+    remote &&
+    (await remote.downloadFile(request, response, url, grant))
+  ) {
     return;
   }
   const sessionId = grant ? grant.sessionId : (url.searchParams.get("sessionId") ?? "");
@@ -223,10 +246,18 @@ export async function downloadWorkspaceFile(
     response.writeHead(404).end();
     return;
   }
+  const target =
+    options?.allowedRoots !== undefined
+      ? resolveContainedFilePath(root, path, options.allowedRoots)
+      : resolve(root, path);
+  if (target === undefined) {
+    response.writeHead(403, { "content-type": "text/plain" }).end("access denied");
+    return;
+  }
   let file;
   try {
-    // Match workspace preview: absolute paths may name files outside the cwd.
-    file = await open(resolve(root, path), constants.O_RDONLY | constants.O_NONBLOCK);
+    // Match workspace preview for full-access callers; scoped callers are confined above.
+    file = await open(target, constants.O_RDONLY | constants.O_NONBLOCK);
     const meta = await file.stat();
     if (!meta.isFile()) throw new Error("not a regular file");
     const name = basename(path);

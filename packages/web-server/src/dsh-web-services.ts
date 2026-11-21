@@ -13,6 +13,7 @@ import {
   type DshWebBackend,
   type OfficeToPdfRequest,
   type OfficeToPdfResult,
+  type WebAccessExtensionHost,
   type WebPluginRuntime,
   type WebPluginRuntimeOptions,
 } from "@codexhost/dsh-web-backend";
@@ -25,7 +26,8 @@ export {
   type WebPluginRuntime,
 } from "@codexhost/dsh-web-backend";
 
-import type { StreamSink } from "./transport.ts";
+import type { RequestAuth } from "./auth.ts";
+import { RpcError, type StreamSink } from "./transport.ts";
 
 export interface DshWebServicesOptions {
   /** Release-only Office engine preparation, independent of request cancellation. */
@@ -36,6 +38,8 @@ export interface DshWebServicesOptions {
   readonly threadWorkspace: (sessionId: string) => string | undefined;
   /** File access root for a local Thread or a workspace-bound draft. */
   readonly fileWorkspace?: (sessionId: string) => string | undefined;
+  /** Optional CodexHost access-policy extension port exposed to trusted Web plugins. */
+  readonly codexhostAccess?: WebAccessExtensionHost;
 }
 
 export class DshWebServices {
@@ -61,14 +65,52 @@ export class DshWebServices {
     request: IncomingMessage,
     body: string,
     response: ServerResponse,
+    auth?: RequestAuth,
+    authorize?: (
+      method: string,
+      args: Record<string, unknown>,
+      auth: RequestAuth | undefined,
+    ) => Promise<void> | void,
   ): Promise<boolean> {
-    let method: unknown;
+    let envelope: { rpcId?: unknown; method?: unknown; payload?: { args?: unknown } };
     try {
-      method = (JSON.parse(body) as { method?: unknown }).method;
+      envelope = JSON.parse(body) as typeof envelope;
     } catch {
       return false;
     }
+    const method = envelope.method;
     if (typeof method !== "string" || !this.backend.handles(method)) return false;
+    if (authorize !== undefined) {
+      const rawArgs = envelope.payload?.args;
+      const args =
+        typeof rawArgs === "object" && rawArgs !== null && !Array.isArray(rawArgs)
+          ? (rawArgs as Record<string, unknown>)
+          : {};
+      try {
+        await authorize(method, args, auth);
+      } catch (error) {
+        const failure =
+          error instanceof RpcError
+            ? { code: error.code, message: error.message, details: error.details }
+            : {
+                code: "auth/forbidden",
+                message: error instanceof Error ? error.message : "Access denied",
+                details: {},
+              };
+        const reply = JSON.stringify({
+          type: "server-response",
+          rpcId: typeof envelope.rpcId === "string" ? envelope.rpcId : "",
+          result: { ok: false, error: failure },
+        });
+        response
+          .writeHead(200, {
+            "content-type": "application/json; charset=utf-8",
+            "cache-control": "no-store",
+          })
+          .end(reply);
+        return true;
+      }
+    }
     // A browser that navigates away must cancel the DSH read or conversion it
     // started instead of leaving it running to completion.
     const lifetime = new AbortController();

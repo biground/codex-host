@@ -54,6 +54,8 @@ import {
 import { UI_EXTENSION_PAGE } from "./ui-extension-page.ts";
 import { WebUiExtensions } from "./ui-extensions.ts";
 import { AccessTokenStore } from "./access-tokens.ts";
+import { WebAccessPolicyRegistry } from "./access-policy.ts";
+import { WebAccessEnforcer } from "./access-enforcer.ts";
 import { SWITCH_TOKEN_SCRIPT } from "./auth-page.ts";
 import { AccessAuth, CredentialConnections, LOCAL_CREDENTIAL, type RequestAuth } from "./auth.ts";
 import {
@@ -218,8 +220,9 @@ const accessTokens =
   values["no-auth"] === true
     ? undefined
     : new AccessTokenStore(data, values.token === undefined ? {} : { token: values.token });
+const accessPolicies = new WebAccessPolicyRegistry();
 const connections = new CredentialConnections();
-const auth = accessTokens && new AccessAuth(accessTokens, trust, connections);
+const auth = accessTokens && new AccessAuth(accessTokens, trust, connections, accessPolicies);
 const rpc = new RpcRegistry();
 const streams = new StreamRegistry();
 const events = new EventHub(homedir());
@@ -300,12 +303,62 @@ const sessions = new ChSessions(
   enabledHarnesses,
   (path, action) => openWorkspaceFile(launcher, path, action),
 );
+const accessEnforcer = new WebAccessEnforcer(accessPolicies, sessions, workspaces);
+workspaces.setAccessFilter({
+  isWorkspaceAllowed: (requestAuth, workspace) =>
+    accessEnforcer.isWorkspaceAllowed(requestAuth, workspace),
+  isSessionAllowed: (requestAuth, sessionId) =>
+    accessEnforcer.isSessionAllowedSync(requestAuth, sessionId),
+});
+sessions.setAccessFilter({
+  isSessionAllowed: (requestAuth, sessionId) =>
+    accessEnforcer.isSessionAllowedSync(requestAuth, sessionId),
+});
+events.setAccessFilter({
+  canDeliverEvent: (requestAuth, event, args) =>
+    accessEnforcer.canDeliverEvent(requestAuth, event, args),
+  canDeliverWaterfall: (requestAuth, agentId) =>
+    accessEnforcer.canDeliverWaterfall(requestAuth, agentId),
+});
+rpc.setAccessGuard((method, args, context, next) =>
+  accessEnforcer.guardRpc(method, args, context, next),
+);
+streams.setAccessGuard((endpoint, args, sink, next) =>
+  accessEnforcer.guardStream(endpoint, args, sink, next),
+);
 // The right Sidebar's DSH backend runs in this process; a failure disables the
 // panel without taking Web down.
 const dsh = await DshWebServices.open({
   workspaceRoot: resolve(values.workspace as string),
   threadWorkspace: (id) => sessions.terminalWorkspaceRoot(id),
   fileWorkspace: (id) => sessions.fileWorkspaceRoot(id),
+  codexhostAccess: {
+    authEnabled: accessTokens !== undefined,
+    dataDirectory: dataRoot,
+    registerProvider: (provider) => accessPolicies.registerProvider(provider),
+    revokeCredential: (credentialId) => accessPolicies.revokeCredential(credentialId),
+    getRequestAuth: (request) => accessPolicies.getRequestAuth(request),
+    listProjects: () => sessions.listKnownProjects(),
+    listModels: async () => {
+      try {
+        const catalog = await sessions.catalog.models();
+        return catalog.groups.map((group) => ({
+          id: group.id,
+          name: group.name,
+          models: group.models.map((model) => ({
+            id: model.id,
+            name: model.name,
+            ...(model.description !== undefined ? { description: model.description } : {}),
+            ...(model.fastModel !== undefined ? { fastModel: model.fastModel } : {}),
+            ...(model.ultrafastModel !== undefined ? { ultrafastModel: model.ultrafastModel } : {}),
+          })),
+        }));
+      } catch {
+        return [];
+      }
+    },
+    getNetworkUrls: async () => (await readNetworkAccess()).networkUrls,
+  },
   ...(RELEASE_WEB
     ? {
         ensureOfficeEngine: createOfficeEngine(
@@ -325,15 +378,20 @@ const settings = new Settings(data, events);
 const push = new PushNotifier(data);
 const downloadTickets = new WorkspaceDownloadTickets();
 if (accessTokens !== undefined) {
-  push.retainOwners((owner) => owner === LOCAL_CREDENTIAL || accessTokens.has(owner));
   accessTokens.onRevoked((id) => {
     connections.revoke(id);
     push.dropOwner(id);
     downloadTickets.revokeOwner(id);
   });
+  accessPolicies.onRevoked((id) => {
+    connections.revoke(id);
+    push.dropOwner(id);
+  });
 }
 const pushNotifications = chHost.realtime
-  ? new ChPushNotifications(chHost.realtime, push)
+  ? new ChPushNotifications(chHost.realtime, push, (owner, cwd) =>
+      accessEnforcer.canDeliverPush(owner, cwd),
+    )
   : undefined;
 const devWebUi = values["dev-web-ui"] === undefined ? undefined : resolve(values["dev-web-ui"]);
 const assetOptions: WebAssetOptions =
@@ -411,6 +469,11 @@ if (!values["safe-mode"]) {
     );
     console.warn("[extensions] using built-in UI; manage extensions at /extensions");
   }
+}
+if (accessTokens !== undefined) {
+  push.retainOwners(
+    (owner) => owner === LOCAL_CREDENTIAL || accessTokens.has(owner) || accessPolicies.has(owner),
+  );
 }
 const shellReload = devWebUi === undefined ? undefined : new WebShellReload(assets);
 
@@ -668,13 +731,26 @@ const server = createWebServer((request, response) => {
       pathname === "/api/workspace-file/download" &&
       (request.method === "GET" || request.method === "HEAD")
     ) {
+      const requestUrl = new URL(url, "http://localhost");
+      const sessionId = requestUrl.searchParams.get("sessionId") ?? "";
+      const downloadAccess = await accessEnforcer.authorizeWorkspaceDownload(
+        requestAuth,
+        sessionId,
+      );
+      if (!downloadAccess.allowed) {
+        response.writeHead(403, { "content-type": "text/plain" }).end("access denied");
+        return;
+      }
       await downloadWorkspaceFile(
         request,
         response,
-        new URL(url, "http://localhost"),
+        requestUrl,
         (id) => sessions.fileWorkspaceRoot(id),
         undefined,
-        remoteWorkspaceFiles,
+        requestAuth?.scope === "scoped" ? undefined : remoteWorkspaceFiles,
+        downloadAccess.allowedRoots !== undefined
+          ? { allowedRoots: downloadAccess.allowedRoots }
+          : undefined,
       );
       return;
     }
@@ -683,6 +759,10 @@ const server = createWebServer((request, response) => {
       response.setHeader("Cache-Control", "private, no-store");
       if (!path) {
         response.writeHead(400).end(request.method === "HEAD" ? undefined : "missing path");
+        return;
+      }
+      if (!accessEnforcer.authorizeLocalImageFile(requestAuth, path)) {
+        response.writeHead(403).end(request.method === "HEAD" ? undefined : "access denied");
         return;
       }
       try {
@@ -701,6 +781,7 @@ const server = createWebServer((request, response) => {
       pathname === REMOTE_PEER_FILE_PROXY_PATH &&
       (request.method === "GET" || request.method === "HEAD")
     ) {
+      if (accessEnforcer.rejectScopedHttp(requestAuth, response)) return;
       await remoteSessions.servePeerFile(request, response);
       return;
     }
@@ -709,6 +790,7 @@ const server = createWebServer((request, response) => {
         response.writeHead(401).end();
         return;
       }
+      if (accessEnforcer.rejectScopedHttp(requestAuth, response)) return;
       if (!trust.sameOrigin(request)) {
         response.writeHead(403).end();
         return;
@@ -819,6 +901,7 @@ const server = createWebServer((request, response) => {
       return;
     }
     if (pathname.startsWith("/api/ch/v1/")) {
+      if (accessEnforcer.rejectScopedHttp(requestAuth, response)) return;
       if (!trust.sameOrigin(request)) {
         response
           .writeHead(403, { "content-type": "text/plain" })
@@ -839,20 +922,29 @@ const server = createWebServer((request, response) => {
         return;
       }
       if (pathname === DESKTOP_SCREENSHOT_PATH) {
+        if (accessEnforcer.rejectScopedHttp(requestAuth, response)) return;
         await desktopScreenshots.serve(request, response);
         return;
       }
       if (pathname === "/api/voice/transcribe") {
+        if (accessEnforcer.rejectScopedHttp(requestAuth, response)) return;
         await serveVoiceTranscription(chHost, dataRoot, request, response);
         return;
       }
       if (pathname === "/api/session/uploadFileBinary") {
+        const uploadSessionId =
+          new URL(url, "http://localhost").searchParams.get("sessionId") ?? "";
+        if (!(await accessEnforcer.authorizeBinaryUpload(requestAuth, uploadSessionId))) {
+          request.resume();
+          response.writeHead(403, { "content-type": "text/plain" }).end("access denied");
+          return;
+        }
         await serveFileUpload(
           sessions,
           request,
           response,
           trust.relaySockets.has(request.socket),
-          remoteSessions,
+          requestAuth?.scope === "scoped" ? undefined : remoteSessions,
         );
         return;
       }
@@ -865,15 +957,30 @@ const server = createWebServer((request, response) => {
           (id) => sessions.fileWorkspaceRoot(id),
           downloadTickets,
           requestAuth?.credential,
-          remoteWorkspaceFiles,
+          requestAuth?.scope === "scoped" ? undefined : remoteWorkspaceFiles,
           request,
+          (sessionId) => accessEnforcer.authorizeWorkspaceDownload(requestAuth, sessionId),
         );
         return;
       }
       const body = await readBody(request, response);
       if (body === undefined) return;
-      if (await remoteWorkspaceFiles.handleApiRequest(request, body, response)) return;
-      if (dsh && (await dsh.handleApiRequest(request, body, response))) return;
+      if (
+        requestAuth?.scope !== "scoped" &&
+        (await remoteWorkspaceFiles.handleApiRequest(request, body, response))
+      )
+        return;
+      if (
+        dsh &&
+        (await dsh.handleApiRequest(
+          request,
+          body,
+          response,
+          requestAuth,
+          (method, args, authInfo) => accessEnforcer.authorizeDsh(method, args, authInfo),
+        ))
+      )
+        return;
       let listTiming: SessionListTiming | undefined;
       let listOk = false;
       const rpcAbort = new AbortController();
@@ -925,6 +1032,7 @@ const server = createWebServer((request, response) => {
       return;
     }
     if (pathname === "/extensions") {
+      if (accessEnforcer.rejectScopedHttp(requestAuth, response)) return;
       await send(request, response, {
         contentType: "text/html; charset=utf-8",
         body: Buffer.from(UI_EXTENSION_PAGE),
@@ -1048,10 +1156,14 @@ server.on("upgrade", (request, socket, head) => {
     sidebarBrowser.upgrade(request, socket, head, trust, auth);
     return;
   }
-  if (auth !== undefined && !auth.admitUpgrade(request, socket)) return;
+  let upgradeAuth: RequestAuth | undefined;
+  if (auth !== undefined) {
+    upgradeAuth = auth.admitUpgrade(request, socket);
+    if (upgradeAuth === undefined) return;
+  }
   if (path === "/api/remote.mux")
     wss.handleUpgrade(request, socket, head, (ws) =>
-      streams.attach(ws, trust.relaySockets.has(request.socket)),
+      streams.attach(ws, trust.relaySockets.has(request.socket), upgradeAuth),
     );
   else {
     void (pluginRuntime?.upgrade(request, socket, head) ?? Promise.resolve(false))

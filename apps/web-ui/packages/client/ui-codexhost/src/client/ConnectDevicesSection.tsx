@@ -51,6 +51,7 @@ type ConfirmKind = "regenerate" | "stop" | "signOut";
 type View =
   | { kind: "loading" }
   | { kind: "ready"; data: WebAccessState }
+  | { kind: "scoped"; label?: string }
   | { kind: "disabled" }
   | { kind: "failed"; message: string };
 const messageOf = (cause: unknown): string =>
@@ -137,17 +138,34 @@ function ShareThisComputerPanel({ t }: PropsLocale<"codexhostImport">): ReactNod
     const controller = new AbortController();
     void readWebAccessAuth(controller.signal)
       .then((status) => {
-        if (!controller.signal.aborted) setRemote(status.authenticated && !status.local);
+        if (controller.signal.aborted) return;
+        setRemote(status.authenticated && !status.local);
+        if (status.scope === "scoped") {
+          setView({
+            kind: "scoped",
+            ...(status.label !== undefined ? { label: status.label } : {}),
+          });
+          return;
+        }
+        void accessTokenApi.get().then(
+          (data) => {
+            if (!controller.signal.aborted) setView({ kind: "ready", data });
+          },
+          (cause: unknown) => {
+            if (!controller.signal.aborted) setView(viewOfError(cause));
+          },
+        );
       })
-      .catch(() => undefined);
-    void accessTokenApi.get().then(
-      (data) => {
-        if (!controller.signal.aborted) setView({ kind: "ready", data });
-      },
-      (cause: unknown) => {
-        if (!controller.signal.aborted) setView(viewOfError(cause));
-      },
-    );
+      .catch(() => {
+        void accessTokenApi.get().then(
+          (data) => {
+            if (!controller.signal.aborted) setView({ kind: "ready", data });
+          },
+          (cause: unknown) => {
+            if (!controller.signal.aborted) setView(viewOfError(cause));
+          },
+        );
+      });
     return () => {
       controller.abort();
     };
@@ -236,6 +254,57 @@ function ShareThisComputerPanel({ t }: PropsLocale<"codexhostImport">): ReactNod
         {t("connectDevices.loadFailed", { message: view.message })}
       </p>
     );
+  if (view.kind === "scoped") {
+    return (
+      <div className={css.page} data-connect-devices="scoped">
+        <section className={css.manage}>
+          <div className={css.manageRow}>
+            <div className={css.manageText}>
+              <span className={css.manageTitle}>{t("connectDevices.scopedTitle")}</span>
+              <span className={css.meta}>{t("connectDevices.scopedDescription")}</span>
+              {view.label !== undefined && (
+                <span className={css.meta}>
+                  {t("connectDevices.scopedKeyLabel", { label: view.label })}
+                </span>
+              )}
+            </div>
+          </div>
+          <div className={css.manageRow}>
+            <div className={css.manageText}>
+              <span className={css.manageTitle}>{t("connectDevices.signOutRowTitle")}</span>
+              <span className={css.meta}>{t("connectDevices.signOutHint")}</span>
+            </div>
+            <div className={css.manageActions}>
+              <Button
+                variant="outline"
+                disabled={busy}
+                onClick={() => {
+                  setError(null);
+                  setConfirming("signOut");
+                }}
+              >
+                {t("connectDevices.signOut")}
+              </Button>
+            </div>
+          </div>
+        </section>
+        {confirming === "signOut" && (
+          <Confirm
+            t={t}
+            title={t("connectDevices.signOutTitle")}
+            description={t("connectDevices.signOutDescription")}
+            confirmLabel={t("connectDevices.signOutConfirm")}
+            busy={busy}
+            error={error}
+            onClose={() => setConfirming(null)}
+            onConfirm={() => {
+              void run(signOut);
+            }}
+          />
+        )}
+      </div>
+    );
+  }
 
   const { data } = view;
   const { secret, lastUsedAt, networkUrls, tailscale, background } = data;

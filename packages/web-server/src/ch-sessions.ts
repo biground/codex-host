@@ -58,6 +58,8 @@ import { WebFileReferences, type RemoteFileReferencesSearch } from "./file-refer
 import { type WebFiles, WEB_FILE_INPUT } from "./web-files.ts";
 import { ChRealtime } from "./ch-realtime.ts";
 import { ChInteractions } from "./ch-interactions.ts";
+import { filterModelCatalog } from "./access-policy.ts";
+import type { RequestAuth } from "./auth.ts";
 import type { WebHarnessPreferences } from "./harness-preferences.ts";
 import { requestOf } from "./store.ts";
 import {
@@ -67,6 +69,18 @@ import {
   type StreamRegistry,
   type StreamSink,
 } from "./transport.ts";
+
+export interface SessionAccessFilter {
+  isSessionAllowed(auth: RequestAuth | undefined, sessionId: string): boolean;
+}
+
+export interface ResolvedSessionAccess {
+  readonly id: string;
+  readonly cwd?: string;
+  readonly provider?: string;
+  readonly model?: string;
+  readonly isDraft: boolean;
+}
 import type { Workspaces } from "./workspaces.ts";
 import { defaultProjections } from "./session-log.ts";
 import { applyUsageProjections } from "./usage-projection.ts";
@@ -113,6 +127,7 @@ export class ChSessions {
   private readonly threads = new WebThreadStates();
   private drafts = new Map<string, Draft>();
   private controls = new Set<StreamSink>();
+  private accessFilter?: SessionAccessFilter;
   private refreshing: Promise<CatalogPage | undefined> | undefined;
   private refreshingCatalog = false;
   private refreshingArchives = false;
@@ -289,6 +304,109 @@ export class ChSessions {
     this.refreshingProjectAssignments?.set(threadId, projectId);
     const row = this.rows.get(threadId);
     if (row) row.projectId = projectId;
+  }
+
+  setAccessFilter(filter: SessionAccessFilter): void {
+    this.accessFilter = filter;
+  }
+
+  private pushControl(sessionId: string, frame: unknown): void {
+    const filter = this.accessFilter;
+    for (const sink of this.controls) {
+      if (filter && sink.auth?.scope === "scoped" && !filter.isSessionAllowed(sink.auth, sessionId))
+        continue;
+      sink.push(frame);
+    }
+  }
+
+  /** Fast synchronous cwd lookup for broadcast filtering. */
+  sessionCwdSync(sessionId: string): string | undefined {
+    const draft = this.drafts.get(sessionId);
+    if (draft && !draft.canonicalId) return draft.cwd;
+    const id = this.id(sessionId);
+    return (
+      this.rows.get(id)?.cwd ??
+      this.threads.view(id)?.thread.cwd ??
+      this.workspaces.ownerOf(id)?.path
+    );
+  }
+
+  /** Authoritative async lookup of a local session/draft's cwd and effective model. */
+  async resolveSessionAccess(sessionId: string): Promise<ResolvedSessionAccess | undefined> {
+    if (!sessionId || sessionId.startsWith("web-remote:")) return undefined;
+    const draft = this.drafts.get(sessionId);
+    if (draft && !draft.canonicalId) {
+      return {
+        id: draft.id,
+        ...(draft.cwd !== undefined ? { cwd: draft.cwd } : {}),
+        provider: draft.selection.provider,
+        model: draft.selection.model,
+        isDraft: true,
+      };
+    }
+    const id = this.id(sessionId);
+    try {
+      const owner = await this.owner(id);
+      let cwd = this.rows.get(id)?.cwd ?? this.threads.view(id)?.thread.cwd;
+      if (!cwd) {
+        const read = await this.readThread(id);
+        this.rows.set(read.thread.id, read.thread);
+        this.threads.setHarness(read.thread.id, read.harnessId);
+        cwd = read.thread.cwd;
+      }
+      const viewSelection = this.threads.view(id)?.log.projections.modelSelection as
+        | {
+            next?: { provider?: string; model?: string };
+            lastUsed?: { provider?: string; model?: string };
+          }
+        | undefined;
+      const model =
+        owner.effectiveModel?.id ??
+        (viewSelection?.next?.provider === owner.harnessId
+          ? viewSelection.next.model
+          : undefined) ??
+        (viewSelection?.lastUsed?.provider === owner.harnessId
+          ? viewSelection.lastUsed.model
+          : undefined);
+      return {
+        id,
+        ...(cwd !== undefined ? { cwd } : {}),
+        ...(owner.harnessId !== undefined ? { provider: owner.harnessId } : {}),
+        ...(model !== undefined ? { model } : {}),
+        isDraft: false,
+      };
+    } catch {
+      return undefined;
+    }
+  }
+
+  /** Known local projects for primary management UIs (Web workspaces + native Codex projects). */
+  async listKnownProjects(): Promise<Array<{ workspaceId?: string; title: string; path: string }>> {
+    const byPath = new Map<string, { workspaceId?: string; title: string; path: string }>();
+    for (const workspace of this.workspaces.list()) {
+      if (workspace.remote) continue;
+      byPath.set(resolve(workspace.path), {
+        workspaceId: workspace.workspaceId,
+        title: workspace.title,
+        path: workspace.path,
+      });
+    }
+    const snapshot = await this.host.projects([]).catch(() => undefined);
+    if (snapshot) {
+      const titles = projectRootTitles(snapshot.projects);
+      for (const project of snapshot.projects) {
+        for (const root of project.rootPaths) {
+          const normalized = resolve(root);
+          if (!byPath.has(normalized)) {
+            byPath.set(normalized, {
+              title: titles.get(normalized) ?? project.name,
+              path: normalized,
+            });
+          }
+        }
+      }
+    }
+    return [...byPath.values()].sort((a, b) => a.title.localeCompare(b.title));
   }
   /** A `scope` reads an explicit page on until it reaches a Thread of that folder. */
   private async refresh(
@@ -786,8 +904,7 @@ export class ChSessions {
           if (WEB_FOLLOW_PROJECTION_KEYS.has(key)) {
             history.log.pushProjection(key, value, seq);
           } else {
-            for (const sink of this.controls)
-              sink.push({ type: "projection", sessionId, key, value, seq });
+            this.pushControl(sessionId, { type: "projection", sessionId, key, value, seq });
           }
         },
         this.threads.get(id)?.viewOrigin,
@@ -1065,6 +1182,7 @@ export class ChSessions {
   private async create(
     args: Record<string, unknown>,
     configuration?: DraftConfiguration,
+    auth?: RequestAuth,
   ): Promise<{ sessionId: string; agentPreset: string }> {
     const request = requestOf<{ cwd?: string; workspaceId?: string; sessionId?: string }>(args);
     const workspace = request.workspaceId ? this.workspaces.get(request.workspaceId) : undefined;
@@ -1090,9 +1208,17 @@ export class ChSessions {
     if (existing || this.rows.has(id))
       throw new RpcError("session/busy", "This Session already exists; start a new draft.");
     const preferences = configuration ? undefined : this.preferences?.get().catch(() => undefined);
-    const selection =
-      configuration?.selection ??
-      (await this.catalog.models(false, undefined, preferences)).default;
+    let selection: ModelSelection | undefined;
+    if (configuration) {
+      selection = configuration.selection;
+    } else if (auth?.scope === "scoped" && auth.policy !== undefined) {
+      selection = filterModelCatalog(
+        await this.catalog.models(false, undefined, preferences),
+        auth.policy,
+      ).default;
+    } else {
+      selection = (await this.catalog.models(false, undefined, preferences)).default;
+    }
     if (!selection)
       throw new RpcError(
         "host/no-harness",
@@ -1118,7 +1244,7 @@ export class ChSessions {
       if (permissionModeId) draft.permissionModeId = permissionModeId;
     }
     if (this.closed) throw new RpcError("session/closed", "Web sessions are closing.");
-    if (this.drafts.has(id)) return this.create(args, configuration);
+    if (this.drafts.has(id)) return this.create(args, configuration, auth);
     this.drafts.set(id, draft);
     if (cwd && selection.provider !== "codex") this.skills.prepare(cwd);
     if (this.workspaces.usesNativeProjects) {
@@ -1604,7 +1730,7 @@ export class ChSessions {
         nextCursor: page ? nextCatalogCursor(page, includeArchived) : null,
       };
     });
-    rpc.register("session/create", (args) => this.create(args));
+    rpc.register("session/create", (args, context) => this.create(args, undefined, context.auth));
     rpc.register("session/fork", async (args) => {
       const request = requestOf<{ sessionId: string; atSeq?: number }>(args);
       if (
@@ -1676,7 +1802,7 @@ export class ChSessions {
       const request = requestOf<{ refresh?: true; harnessId?: string } | undefined>(args);
       return this.catalog.models(request?.refresh === true, request?.harnessId);
     });
-    rpc.register("session/selectModel", async (args) => {
+    rpc.register("session/selectModel", async (args, context) => {
       const request = requestOf<ModelSelection & { sessionId: string }>(args);
       const model = harnessModelRefFromKey(request.model);
       const draft = this.drafts.get(request.sessionId);
@@ -1700,24 +1826,30 @@ export class ChSessions {
           if (permissionModeId) draft.permissionModeId = permissionModeId;
         }
         draft.selection = request;
-        await this.preferences
-          ?.remember(request.provider, {
-            model,
-            thinkingOptionId: request.reasoningEffort,
-            permissionModeId: draft.permissionModeId,
-          })
-          .catch(() =>
-            this.events.emit(
-              "codexhost/preferences-error",
-              "New session defaults could not be saved.",
-            ),
-          );
-        this.events.emit("api-session/added", await this.draftSummary(draft, false));
-        for (const sink of this.controls) {
-          const s = await this.draftSummary(draft);
-          for (const [key, value] of Object.entries(s.projections.values))
-            sink.push({ type: "projection", sessionId: draft.id, key, value, seq: 0 });
+        if (context.auth?.scope !== "scoped") {
+          await this.preferences
+            ?.remember(request.provider, {
+              model,
+              thinkingOptionId: request.reasoningEffort,
+              permissionModeId: draft.permissionModeId,
+            })
+            .catch(() =>
+              this.events.emit(
+                "codexhost/preferences-error",
+                "New session defaults could not be saved.",
+              ),
+            );
         }
+        this.events.emit("api-session/added", await this.draftSummary(draft, false));
+        const s = await this.draftSummary(draft);
+        for (const [key, value] of Object.entries(s.projections.values))
+          this.pushControl(draft.id, {
+            type: "projection",
+            sessionId: draft.id,
+            key,
+            value,
+            seq: 0,
+          });
         return {};
       }
       const owner = await this.owner(request.sessionId);
@@ -1773,7 +1905,7 @@ export class ChSessions {
         });
       return {};
     });
-    rpc.register("session/prompt", async (args) => {
+    rpc.register("session/prompt", async (args, context) => {
       const request = requestOf<{
         sessionId: string;
         requestId?: string;
@@ -1851,7 +1983,7 @@ export class ChSessions {
           ...(request.requestId ? { clientUserMessageId: request.requestId } : {}),
         });
       }
-      if (draft && !draft.titleRequested) {
+      if (draft && !draft.titleRequested && context.auth?.scope !== "scoped") {
         draft.titleRequested = true;
         const row = this.rows.get(threadId);
         if (row) {
@@ -2155,9 +2287,12 @@ export class ChSessions {
           : {};
       });
     streams.register("session/control", async (_args, sink) => {
+      const filter = this.accessFilter;
+      const canSee = (id: string): boolean =>
+        !filter || sink.auth?.scope !== "scoped" || filter.isSessionAllowed(sink.auth, id);
       const projections: Record<string, unknown> = {};
       for (const draft of this.drafts.values())
-        if (!draft.canonicalId) {
+        if (!draft.canonicalId && canSee(draft.id)) {
           const summary = await this.draftSummary(draft);
           if (!draft.canonicalId) projections[draft.id] = summary.projections;
         }
@@ -2166,6 +2301,7 @@ export class ChSessions {
       // it settles, in one synchronous step: the client requires the baseline
       // before any delta, and changes during preparation belong in that baseline.
       for (const [id, view] of this.threads.views()) {
+        if (!canSee(id)) continue;
         const baseline = view.log.projectionBaseline();
         projections[id] = {
           ...baseline,
@@ -2319,7 +2455,7 @@ export class ChSessions {
         input: { hint: "<mode>" },
       },
     ]);
-    rpc.register("commands/execute", async (args) => {
+    rpc.register("commands/execute", async (args, context) => {
       const id = String(args.agentId ?? "");
       const match = /^\/permission\s+(.+)$/u.exec(String(args.line ?? ""));
       if (!match) return undefined;
@@ -2344,26 +2480,27 @@ export class ChSessions {
         if (draft.creating || draft.started || draft.selection.provider !== harnessId)
           throw new RpcError("session/busy", "Draft selection changed.");
         draft.permissionModeId = modeId;
-        await this.preferences
-          ?.remember(harnessId, {
-            model: harnessModelRefFromKey(draft.selection.model),
-            thinkingOptionId: draft.selection.reasoningEffort,
-            permissionModeId: modeId,
-          })
-          .catch(() =>
-            this.events.emit(
-              "codexhost/preferences-error",
-              "New session defaults could not be saved.",
-            ),
-          );
-        for (const sink of this.controls)
-          sink.push({
-            type: "projection",
-            sessionId: id,
-            key: "permissions",
-            value: { currentValue: modeId },
-            seq: 0,
-          });
+        if (context.auth?.scope !== "scoped") {
+          await this.preferences
+            ?.remember(harnessId, {
+              model: harnessModelRefFromKey(draft.selection.model),
+              thinkingOptionId: draft.selection.reasoningEffort,
+              permissionModeId: modeId,
+            })
+            .catch(() =>
+              this.events.emit(
+                "codexhost/preferences-error",
+                "New session defaults could not be saved.",
+              ),
+            );
+        }
+        this.pushControl(id, {
+          type: "projection",
+          sessionId: id,
+          key: "permissions",
+          value: { currentValue: modeId },
+          seq: 0,
+        });
       } else {
         await this.host.request("codexhost/thread/permission-mode/select", {
           threadId: this.id(id),

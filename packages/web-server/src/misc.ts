@@ -8,7 +8,9 @@ import { requestOf } from "./store.ts";
 import { type EventHub, RpcError, type RpcRegistry } from "./transport.ts";
 
 export function registerMisc(rpc: RpcRegistry, deps: { events: EventHub }): void {
-  rpc.register("$events/result", (args) => deps.events.settle(requestOf(args)));
+  rpc.register("$events/result", (args, context) =>
+    deps.events.settle(requestOf(args), context.auth),
+  );
   rpc.register("credentials/describe", (args) => {
     const refs = (args.refs as string[] | undefined) ?? [];
     return Object.fromEntries(

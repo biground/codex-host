@@ -26,6 +26,7 @@ export class ChPushNotifications {
   constructor(
     private readonly host: NonNullable<ChHostClient["realtime"]>,
     private readonly push: Pick<PushNotifier, "subscriptionCount" | "notify">,
+    private readonly canDeliver?: (owner: string | undefined, cwd: string | undefined) => boolean,
   ) {
     this.unsubscribe = host.subscribe((event) => this.receive(event));
   }
@@ -115,12 +116,16 @@ export class ChPushNotifications {
         const oldest = this.delivered.values().next().value;
         if (oldest !== undefined) this.delivered.delete(oldest);
       }
-      await this.push.notify({
-        ...message,
-        tag: event.threadId,
-        sessionId: event.threadId,
-        url: `./?session=${encodeURIComponent(event.threadId)}`,
-      });
+      const canDeliver = this.canDeliver;
+      await this.push.notify(
+        {
+          ...message,
+          tag: event.threadId,
+          sessionId: event.threadId,
+          url: `./?session=${encodeURIComponent(event.threadId)}`,
+        },
+        canDeliver ? (owner) => canDeliver(owner, snapshot.thread.cwd) : undefined,
+      );
     }
   }
 

@@ -72,8 +72,15 @@ export class SidebarBrowser {
     const key = new URL(request.url ?? "/", "http://local").searchParams.get(
       SIDEBAR_BROWSER_TAB_PARAM,
     );
-    const credential = auth?.admitUpgrade(request, socket, key !== null);
-    if (auth !== undefined && credential === undefined) return;
+    const admitted = auth?.admitUpgrade(request, socket, key !== null);
+    if (auth !== undefined && admitted === undefined) return;
+    if (admitted?.scope === "scoped") {
+      admitted.release();
+      socket.write("HTTP/1.1 403 Forbidden\r\nConnection: close\r\n\r\n");
+      socket.destroy();
+      return;
+    }
+    const credential = admitted?.credential;
     const direct = this.options.direct;
     const attachDirect =
       key === null && direct && credential !== undefined

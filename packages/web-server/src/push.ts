@@ -113,9 +113,14 @@ export class PushNotifier {
       this.save();
       return { subscribed: true, subscriptions: this.subscriptions.length };
     });
-    rpc.register("codexhost/pushUnsubscribe", (args) => {
+    rpc.register("codexhost/pushUnsubscribe", (args, context) => {
       const endpoint = String(args.endpoint ?? "");
-      this.subscriptions = this.subscriptions.filter((entry) => entry.endpoint !== endpoint);
+      this.subscriptions = this.subscriptions.filter((entry) => {
+        if (entry.endpoint !== endpoint) return true;
+        if (context.auth?.scope === "scoped" && entry.owner !== context.auth.credential)
+          return true;
+        return false;
+      });
       this.save();
       return { subscribed: false, subscriptions: this.subscriptions.length };
     });
@@ -143,18 +148,23 @@ export class PushNotifier {
     });
   }
 
-  /** Deliver one message to every subscription; drops subscriptions the push service rejects as gone. */
-  async notify(message: PushMessage, endpoint?: string): Promise<number> {
-    const subscriptions =
-      endpoint === undefined
+  /** Deliver one message to matching subscriptions; drops subscriptions the push service rejects as gone. */
+  async notify(
+    message: PushMessage,
+    target?: string | ((owner: string | undefined) => boolean),
+  ): Promise<number> {
+    const targets =
+      target === undefined
         ? this.subscriptions
-        : this.subscriptions.filter((entry) => entry.endpoint === endpoint);
-    if (subscriptions.length === 0) return 0;
+        : typeof target === "string"
+          ? this.subscriptions.filter((entry) => entry.endpoint === target)
+          : this.subscriptions.filter((subscription) => target(subscription.owner));
+    if (targets.length === 0) return 0;
     const payload = JSON.stringify(message);
     let sent = 0;
     const gone: string[] = [];
     await Promise.all(
-      subscriptions.map(async (subscription) => {
+      targets.map(async (subscription) => {
         try {
           // web-push's explicit proxy works even before Node's HTTPS environment-proxy support.
           const proxy =

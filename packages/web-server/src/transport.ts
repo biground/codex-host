@@ -37,11 +37,21 @@ type RpcResult =
   | { ok: false; error: { code: string; message: string; details: object } };
 
 export class RpcRegistry {
+  private accessGuard?: (
+    method: string,
+    args: Record<string, unknown>,
+    context: RpcContext,
+    next: () => Promise<unknown>,
+  ) => Promise<unknown>;
   private around?: (
     method: string,
     args: Record<string, unknown>,
     next: () => Promise<unknown>,
   ) => Promise<unknown>;
+  /** Policy enforcement guard; runs before session routing and endpoint handlers. */
+  setAccessGuard(guard: NonNullable<RpcRegistry["accessGuard"]>): void {
+    this.accessGuard = guard;
+  }
   /** Session ownership routing; authentication has already been checked by the HTTP gateway. */
   routeSessions(router: NonNullable<RpcRegistry["around"]>): void {
     this.around = router;
@@ -85,16 +95,20 @@ export class RpcRegistry {
         : {}
     ) as Record<string, unknown>;
     try {
-      const next = async () =>
-        handler(args ?? {}, {
-          method,
-          relay,
-          ...(sessionListTiming === undefined ? {} : { sessionListTiming }),
-          ...(auth === undefined ? {} : { auth }),
-          ...(afterResponse === undefined ? {} : { afterResponse }),
-          ...(signal === undefined ? {} : { signal }),
-        });
-      const value = this.around ? await this.around(method, args ?? {}, next) : await next();
+      const context: RpcContext = {
+        method,
+        relay,
+        ...(sessionListTiming === undefined ? {} : { sessionListTiming }),
+        ...(auth === undefined ? {} : { auth }),
+        ...(afterResponse === undefined ? {} : { afterResponse }),
+        ...(signal === undefined ? {} : { signal }),
+      };
+      const runHandler = async () => handler(args ?? {}, context);
+      const runRouted = async () =>
+        this.around ? await this.around(method, args ?? {}, runHandler) : await runHandler();
+      const value = this.accessGuard
+        ? await this.accessGuard(method, args ?? {}, context, runRouted)
+        : await runRouted();
       return { ok: true, value: value === undefined ? null : value };
     } catch (error) {
       if (error instanceof RpcError) {
@@ -180,6 +194,8 @@ export interface StreamSink {
   readonly id: string;
   /** Set by the accepted physical connection, never by a logical open payload. */
   readonly relay?: boolean;
+  /** Set by the accepted physical connection's authentication, absent with `--no-auth`. */
+  readonly auth?: RequestAuth;
   readonly closed: boolean;
   /** Physical mux input; absent on output-only in-process test/application sinks. */
   readonly input?: DshStreamInput;
@@ -202,12 +218,21 @@ export type StreamFallback = (
 ) => boolean;
 
 export class StreamRegistry {
+  private accessGuard?: (
+    endpoint: string,
+    args: Record<string, unknown>,
+    sink: StreamSink,
+    next: () => Promise<void>,
+  ) => Promise<void>;
   private sessionRouter?: (
     endpoint: string,
     args: Record<string, unknown>,
     sink: StreamSink,
     next: (sink: StreamSink) => Promise<void>,
   ) => boolean | Promise<boolean>;
+  setAccessGuard(guard: NonNullable<StreamRegistry["accessGuard"]>): void {
+    this.accessGuard = guard;
+  }
   routeSessions(router: NonNullable<StreamRegistry["sessionRouter"]>): void {
     this.sessionRouter = router;
   }
@@ -225,7 +250,7 @@ export class StreamRegistry {
   }
 
   /** Attach the mux protocol to one WebSocket. */
-  attach(socket: WebSocket, relay = false): void {
+  attach(socket: WebSocket, relay = false, auth?: RequestAuth): void {
     const inputBytes = 256 * 1024;
     const streams = new Map<
       string,
@@ -281,6 +306,7 @@ export class StreamRegistry {
         const sink: StreamSink = {
           id: streamId,
           relay,
+          ...(auth === undefined ? {} : { auth }),
           input: {
             items: inbox,
             window: {
@@ -314,22 +340,26 @@ export class StreamRegistry {
         streams.set(streamId, { sink, inbox, close });
         const payload = message.payload as { args?: Record<string, unknown> } | undefined;
         const args = payload?.args ?? {};
-        const handler = this.handlers.get(endpoint);
-        if (handler === undefined) {
-          if (this.fallback?.(endpoint, args, sink) === true) return;
-          this.unhandled.set(endpoint, (this.unhandled.get(endpoint) ?? 0) + 1);
-          // Keep unknown streams open and silent: most DSH followers tolerate an idle stream better than an error.
-          return;
-        }
+        const openStream = async (): Promise<void> => {
+          const handler = this.handlers.get(endpoint);
+          if (handler === undefined) {
+            if (this.fallback?.(endpoint, args, sink) === true) return;
+            this.unhandled.set(endpoint, (this.unhandled.get(endpoint) ?? 0) + 1);
+            // Keep unknown streams open and silent: most DSH followers tolerate an idle stream better than an error.
+            return;
+          }
+          if (
+            await this.sessionRouter?.(endpoint, args, sink, async (forward) =>
+              handler(args, forward),
+            )
+          )
+            return;
+          await handler(args, sink);
+        };
         Promise.resolve()
           .then(async () => {
-            if (
-              await this.sessionRouter?.(endpoint, args, sink, async (forward) =>
-                handler(args, forward),
-              )
-            )
-              return;
-            await handler(args, sink);
+            if (this.accessGuard) await this.accessGuard(endpoint, args, sink, openStream);
+            else await openStream();
           })
           .catch((error: unknown) => {
             console.error(`[mux] ${endpoint} failed`, error);
@@ -371,22 +401,40 @@ interface PendingWaterfall {
  * Pending waterfalls survive disconnects: every new client generation receives all of them, so a
  * phone that reconnects after backgrounding still sees the approval its agent is waiting on.
  */
+export interface EventHubAccessFilter {
+  canDeliverEvent(auth: RequestAuth | undefined, event: string, args: readonly unknown[]): boolean;
+  canDeliverWaterfall(auth: RequestAuth | undefined, agentId: string): boolean;
+}
+
 export class EventHub {
   private readonly sinks = new Map<string, StreamSink>();
   private readonly pending = new Map<string, PendingWaterfall>();
+  private accessFilter?: EventHubAccessFilter;
 
   constructor(private readonly home: string) {}
+
+  setAccessFilter(filter: EventHubAccessFilter): void {
+    this.accessFilter = filter;
+  }
 
   handler: StreamHandler = (_args, sink) => {
     const clientId = randomUUID();
     this.sinks.set(clientId, sink);
     sink.onClose(() => this.sinks.delete(clientId));
-    sink.push({ type: "ready", clientId, host: { home: this.home } });
-    for (const waterfall of this.pending.values()) sink.push(this.frameOf(waterfall));
+    const hostHome = sink.auth?.scope === "scoped" ? "" : this.home;
+    sink.push({ type: "ready", clientId, host: { home: hostHome } });
+    for (const waterfall of this.pending.values()) {
+      if (this.accessFilter && !this.accessFilter.canDeliverWaterfall(sink.auth, waterfall.agentId))
+        continue;
+      sink.push(this.frameOf(waterfall));
+    }
   };
 
   emit(event: string, ...args: unknown[]): void {
-    for (const sink of this.sinks.values()) sink.push({ type: "emit", event, args });
+    for (const sink of this.sinks.values()) {
+      if (this.accessFilter && !this.accessFilter.canDeliverEvent(sink.auth, event, args)) continue;
+      sink.push({ type: "emit", event, args });
+    }
   }
 
   private frameOf(waterfall: PendingWaterfall): unknown {
@@ -421,23 +469,39 @@ export class EventHub {
     };
     this.pending.set(eventId, waterfall);
     const frame = this.frameOf(waterfall);
-    for (const sink of this.sinks.values()) sink.push(frame);
+    for (const sink of this.sinks.values()) {
+      if (this.accessFilter && !this.accessFilter.canDeliverWaterfall(sink.auth, agentId)) continue;
+      sink.push(frame);
+    }
     const cancel = (): void => {
       if (!this.pending.delete(eventId)) return;
-      for (const sink of this.sinks.values()) sink.push({ type: "cancel", eventId });
+      for (const sink of this.sinks.values()) {
+        if (this.accessFilter && !this.accessFilter.canDeliverWaterfall(sink.auth, agentId))
+          continue;
+        sink.push({ type: "cancel", eventId });
+      }
       completion.reject(new Error("cancelled"));
     };
     return { result: completion.promise, cancel, eventId };
   }
 
   /** Handle one `$events/result` RPC. */
-  settle(value: {
-    clientId?: string;
-    eventId?: string;
-    outcome?: { kind?: string; value?: unknown; error?: { message?: string } };
-  }): null {
+  settle(
+    value: {
+      clientId?: string;
+      eventId?: string;
+      outcome?: { kind?: string; value?: unknown; error?: { message?: string } };
+    },
+    auth?: RequestAuth,
+  ): null {
     const waterfall = this.pending.get(String(value.eventId ?? ""));
     if (waterfall === undefined) return null;
+    if (this.accessFilter && !this.accessFilter.canDeliverWaterfall(auth, waterfall.agentId)) {
+      throw new RpcError(
+        "auth/forbidden",
+        "This access key is not permitted to answer interactions for this project.",
+      );
+    }
     const outcome = value.outcome;
     if (outcome?.kind === "next") {
       waterfall.delegatedBy.add(String(value.clientId ?? ""));

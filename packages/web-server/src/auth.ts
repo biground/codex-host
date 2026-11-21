@@ -8,7 +8,9 @@
  */
 import type { IncomingMessage, ServerResponse } from "node:http";
 import type { Duplex } from "node:stream";
+import type { WebAccessPolicy } from "@codexhost/dsh-web-backend";
 
+import type { WebAccessPolicyRegistry } from "./access-policy.ts";
 import type { AccessTokenStore } from "./access-tokens.ts";
 import { signInDocument, type SignInNotice } from "./auth-page.ts";
 import { isLocalConnection, type RequestTrust } from "./request-trust.ts";
@@ -31,6 +33,10 @@ export interface RequestAuth {
   /** Owner of this request's connections and push subscriptions. */
   readonly credential: string;
   readonly local: boolean;
+  /** Full access (local/primary token) vs policy-scoped secondary key. */
+  readonly scope: "full" | "scoped";
+  /** Present when `scope === "scoped"`. */
+  readonly policy?: WebAccessPolicy;
   /** Keep this response alive through a revocation it caused, so it can report the result. */
   release(): void;
   /** Replace this request's access-token cookie when it rotates the token it presented. */
@@ -120,13 +126,24 @@ export class AccessAuth {
     private readonly tokens: AccessTokenStore,
     private readonly trust: RequestTrust,
     private readonly connections: CredentialConnections,
+    private readonly policies?: WebAccessPolicyRegistry,
   ) {}
 
-  /** @returns the credential this token grants on this connection, if any. */
-  private credentialFor(token: string, request: IncomingMessage): string | undefined {
+  /** @returns the credential and scope this token grants on this connection, if any. */
+  private resolveCredential(
+    token: string,
+    request: IncomingMessage,
+  ): { credential: string; scope: "full" | "scoped"; policy?: WebAccessPolicy } | undefined {
     if (this.tokens.isLocalToken(token))
-      return isLocalConnection(request) ? LOCAL_CREDENTIAL : undefined;
-    return this.tokens.resolve(token);
+      return isLocalConnection(request)
+        ? { credential: LOCAL_CREDENTIAL, scope: "full" }
+        : undefined;
+    const primary = this.tokens.resolve(token);
+    if (primary !== undefined) return { credential: primary, scope: "full" };
+    const scoped = this.policies?.resolveToken(token);
+    if (scoped !== undefined)
+      return { credential: scoped.credentialId, scope: "scoped", policy: scoped.policy };
+    return undefined;
   }
 
   private cookie(request: IncomingMessage, value: string, maxAge: number): string {
@@ -169,14 +186,29 @@ export class AccessAuth {
     if ((pathname === "/" || pathname === "/index.html") && this.exchange(request, response))
       return { handled: true };
     const presented = presentedToken(request, this.trust.secure(request));
-    const credential =
-      presented === undefined ? undefined : this.credentialFor(presented.token, request);
-    if (presented !== undefined && credential !== undefined) {
-      const auth = this.admit(request, response, credential, presented.source);
+    const resolved =
+      presented === undefined ? undefined : this.resolveCredential(presented.token, request);
+    if (presented !== undefined && resolved !== undefined) {
+      const auth = this.admit(request, response, resolved, presented.source);
       if (pathname !== "/api/auth/status") return { handled: false, auth };
       response
         .writeHead(200, { "content-type": "application/json", "cache-control": "no-store" })
-        .end(JSON.stringify({ authenticated: true, local: auth.local }));
+        .end(
+          JSON.stringify({
+            authenticated: true,
+            local: auth.local,
+            ...(auth.scope === "scoped" && auth.policy !== undefined
+              ? {
+                  scope: "scoped",
+                  ...(auth.policy.label !== undefined ? { label: auth.policy.label } : {}),
+                  capabilities: {
+                    workspaceFiles: auth.policy.allowWorkspaceFiles,
+                    terminal: auth.policy.allowTerminal,
+                  },
+                }
+              : {}),
+          }),
+        );
       return { handled: true };
     }
     if (PUBLIC_ASSET.test(pathname)) return { handled: false, auth: undefined };
@@ -196,17 +228,36 @@ export class AccessAuth {
 
   /**
    * Authenticate a WebSocket upgrade and tie the socket to its credential.
-   * @returns the credential; otherwise the socket has been answered and closed.
+   * @returns the established authentication when admitted; otherwise the socket has been answered and closed.
    * A signaling upgrade tracks its session instead, so revocation stops direct writes first.
    */
-  admitUpgrade(request: IncomingMessage, socket: Duplex, trackSocket = true): string | undefined {
+  admitUpgrade(
+    request: IncomingMessage,
+    socket: Duplex,
+    trackSocket = true,
+  ): RequestAuth | undefined {
     const presented = presentedToken(request, this.trust.secure(request));
-    const credential =
-      presented === undefined ? undefined : this.credentialFor(presented.token, request);
-    if (credential !== undefined) {
-      if (trackSocket) this.connections.track(credential, socket);
+    const resolved =
+      presented === undefined ? undefined : this.resolveCredential(presented.token, request);
+    if (resolved !== undefined) {
+      const release = trackSocket
+        ? this.connections.track(resolved.credential, socket)
+        : () => undefined;
       this.trust.authenticated(request);
-      return credential;
+      const auth: RequestAuth = {
+        credential: resolved.credential,
+        local: isLocalConnection(request),
+        scope: resolved.scope,
+        ...(resolved.policy !== undefined ? { policy: resolved.policy } : {}),
+        release,
+      };
+      this.policies?.trackRequest(request, {
+        credential: auth.credential,
+        local: auth.local,
+        scope: auth.scope,
+        ...(auth.policy !== undefined ? { policy: auth.policy } : {}),
+      });
+      return auth;
     }
     const status = presented === undefined ? 401 : this.countFailure(request);
     socket.write(
@@ -219,15 +270,20 @@ export class AccessAuth {
   private admit(
     request: IncomingMessage,
     response: ServerResponse,
-    credential: string,
+    resolved: { credential: string; scope: "full" | "scoped"; policy?: WebAccessPolicy },
     source: "bearer" | "cookie",
   ): RequestAuth {
     this.trust.authenticated(request);
-    return {
-      credential,
-      local: isLocalConnection(request),
-      release: this.connections.track(credential, response),
-      ...(source === "cookie" && credential !== LOCAL_CREDENTIAL
+    const local = isLocalConnection(request);
+    const auth: RequestAuth = {
+      credential: resolved.credential,
+      local,
+      scope: resolved.scope,
+      ...(resolved.policy !== undefined ? { policy: resolved.policy } : {}),
+      release: this.connections.track(resolved.credential, response),
+      ...(source === "cookie" &&
+      resolved.scope === "full" &&
+      resolved.credential !== LOCAL_CREDENTIAL
         ? {
             renewCookie: (secret: string): void => {
               response.setHeader(
@@ -238,6 +294,13 @@ export class AccessAuth {
           }
         : {}),
     };
+    this.policies?.trackRequest(request, {
+      credential: auth.credential,
+      local: auth.local,
+      scope: auth.scope,
+      ...(auth.policy !== undefined ? { policy: auth.policy } : {}),
+    });
+    return auth;
   }
 
   /** Count an invalid token unless the address is already blocked. */
@@ -325,7 +388,7 @@ export class AccessAuth {
     } catch {
       token = undefined;
     }
-    if (typeof token !== "string" || this.credentialFor(token, request) === undefined) {
+    if (typeof token !== "string" || this.resolveCredential(token, request) === undefined) {
       this.countFailure(request);
       reply(401, { error: { code: "auth/invalid-token" } });
       return;

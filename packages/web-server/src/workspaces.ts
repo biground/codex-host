@@ -6,8 +6,14 @@ import { basename, isAbsolute, join, relative, resolve, sep } from "node:path";
 import { homedir } from "node:os";
 import type { ThreadCatalogReadParams } from "@codexhost/shared-contracts";
 
+import type { RequestAuth } from "./auth.ts";
 import { type DataDir, requestOf } from "./store.ts";
 import { RpcError, type RpcRegistry, type StreamRegistry, type StreamSink } from "./transport.ts";
+
+export interface WorkspaceAccessFilter {
+  isWorkspaceAllowed(auth: RequestAuth | undefined, workspace: WorkspaceView): boolean;
+  isSessionAllowed(auth: RequestAuth | undefined, sessionId: string): boolean;
+}
 
 export interface WorkspaceView {
   remote?: { hostId: string; displayName: string; state: string; color?: string };
@@ -292,6 +298,7 @@ export class Workspaces {
   private nativeRootOwners: ReadonlyMap<string, { path: string; projectId: string }> = new Map();
   private legacyAssignments: Readonly<Record<string, string>> = {};
   private readonly followers = new Set<StreamSink>();
+  private accessFilter?: WorkspaceAccessFilter;
   private referenceGroups: Map<string, string | undefined> | undefined;
   private referenceProjectless: ReadonlySet<string> = new Set();
   private referencePins: string[] | undefined;
@@ -367,8 +374,76 @@ export class Workspaces {
     return this.state.remoteProjectIds?.[sessionId];
   }
 
+  setAccessFilter(filter: WorkspaceAccessFilter): void {
+    this.accessFilter = filter;
+  }
+
+  private filterWorkspaceFor(
+    auth: RequestAuth | undefined,
+    workspace: WorkspaceView,
+  ): WorkspaceView | undefined {
+    const filter = this.accessFilter;
+    if (!filter || auth?.scope !== "scoped") return workspace;
+    if (!filter.isWorkspaceAllowed(auth, workspace)) return undefined;
+    return {
+      ...workspace,
+      sessionIds: workspace.sessionIds.filter((id) => filter.isSessionAllowed(auth, id)),
+    };
+  }
+
+  listFor(auth: RequestAuth | undefined): WorkspaceView[] {
+    const all = this.list();
+    if (!this.accessFilter || auth?.scope !== "scoped") return [...all];
+    const result: WorkspaceView[] = [];
+    for (const workspace of all) {
+      const visible = this.filterWorkspaceFor(auth, workspace);
+      if (visible !== undefined) result.push(visible);
+    }
+    return result;
+  }
+
   private broadcast(frame: unknown): void {
-    for (const sink of this.followers) sink.push(frame);
+    const filter = this.accessFilter;
+    if (!filter) {
+      for (const sink of this.followers) sink.push(frame);
+      return;
+    }
+    for (const sink of this.followers) {
+      if (sink.auth?.scope !== "scoped") {
+        sink.push(frame);
+        continue;
+      }
+      if (typeof frame !== "object" || frame === null || !("type" in frame)) continue;
+      const typed = frame as Record<string, unknown>;
+      if (typed.type === "upsert" && typed.workspace && typeof typed.workspace === "object") {
+        const visible = this.filterWorkspaceFor(sink.auth, typed.workspace as WorkspaceView);
+        if (visible !== undefined) sink.push({ type: "upsert", workspace: visible });
+      } else if (typed.type === "remove" && typeof typed.workspaceId === "string") {
+        const existing = this.list().find((item) => item.workspaceId === typed.workspaceId);
+        if (existing === undefined || filter.isWorkspaceAllowed(sink.auth, existing)) {
+          sink.push(frame);
+        }
+      } else if (typed.type === "order") {
+        sink.push({
+          type: "order",
+          workspaceIds: this.listFor(sink.auth).map((item) => item.workspaceId),
+        });
+      } else if (typed.type === "pinned" && Array.isArray(typed.pinnedSessionIds)) {
+        sink.push({
+          type: "pinned",
+          pinnedSessionIds: (typed.pinnedSessionIds as string[]).filter((id) =>
+            filter.isSessionAllowed(sink.auth, id),
+          ),
+        });
+      } else if (typed.type === "archived" && Array.isArray(typed.archivedSessionIds)) {
+        sink.push({
+          type: "archived",
+          archivedSessionIds: (typed.archivedSessionIds as string[]).filter((id) =>
+            filter.isSessionAllowed(sink.auth, id),
+          ),
+        });
+      }
+    }
   }
 
   private touch(workspace: WorkspaceView): void {
@@ -1118,14 +1193,25 @@ export class Workspaces {
     streams.register("workspace/follow", (_args, sink) => {
       this.followers.add(sink);
       sink.onClose(() => this.followers.delete(sink));
+      const filter = this.accessFilter;
+      const scoped = sink.auth?.scope === "scoped";
+      const items = this.listFor(sink.auth);
+      const pinned = this.pinnedSessionIds();
+      const archived = this.archivedSessionIds();
       sink.push({
         type: "baseline",
         value: {
-          items: this.list(),
-          pinnedSessionIds: this.pinnedSessionIds(),
-          threadSections: this.referenceThreadSections,
-          archivedSessionIds: this.archivedSessionIds(),
-          ...(this.referenceOnlyDefault ? { canStartProjectless: true } : {}),
+          items,
+          pinnedSessionIds:
+            scoped && filter
+              ? pinned.filter((id) => filter.isSessionAllowed(sink.auth, id))
+              : pinned,
+          threadSections: scoped ? [] : this.referenceThreadSections,
+          archivedSessionIds:
+            scoped && filter
+              ? archived.filter((id) => filter.isSessionAllowed(sink.auth, id))
+              : archived,
+          ...(this.referenceOnlyDefault ? { canStartProjectless: !scoped } : {}),
         },
       });
     });
