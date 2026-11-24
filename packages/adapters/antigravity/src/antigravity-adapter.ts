@@ -54,6 +54,7 @@ import {
   harnessPermissionModeIdSchema,
   hostInteractionIdSchema,
   hostItemIdSchema,
+  hostTurnIdSchema,
   type HarnessCommandCatalog,
   type HarnessModelCatalog,
   type HarnessModelRef,
@@ -89,6 +90,12 @@ import {
   projectReplayedEventsToTurns,
 } from "./acp-projection.js";
 import { AntigravitySessionUsageTracker } from "./acp-usage.js";
+import {
+  AntigravityBackgroundTasks,
+  buildBackgroundRecoveryPrompt,
+  findDanglingBackgroundTaskCompletion,
+  readNativeConversationStatus,
+} from "./background-tasks.js";
 import { resolveAntigravityExecutable } from "./command.js";
 import { antigravityDelegationInstructions } from "./delegation.js";
 import { forkAntigravitySession, nativeConversationDbPath, validNativeSessionRef } from "./fork.js";
@@ -149,6 +156,12 @@ export interface AntigravityAdapterOptions {
   printTimeout?: string;
   toolOutputLimit?: number;
   subagentObservationTimeoutMs?: number;
+  backgroundTaskPollIntervalMs?: number;
+  wakePollIntervalMs?: number;
+  wakeCommitWaitMs?: number;
+  wakeActivityLeaseMs?: number;
+  wakeExpectWaitMs?: number;
+  wakeRunningHardCapMs?: number;
   turnCleanupWaitMs?: number;
   createTransport?: (options: AntigravityAcpTransportOptions) => AntigravityAcpTransportLike;
 }
@@ -288,6 +301,7 @@ interface SessionOptions extends RequestedConfiguration {
   unattended: boolean;
   adapter: AntigravityAdapterOptions;
   quota: SessionQuota;
+  recoveredStepsFor?(nativeSessionId: string): Set<number>;
   onClosed(session: AntigravitySession): void;
 }
 /** The Adapter's account-wide quota cache, projected for one Session's Model. */
@@ -346,6 +360,10 @@ export class AntigravitySession implements HarnessSession {
   readonly outputs = this.#channel.outputs;
   readonly #options: SessionOptions;
   readonly #subagents: AntigravitySubagents;
+  readonly #backgroundTasks: AntigravityBackgroundTasks;
+  readonly #localRecoveredSteps = new Set<number>();
+  #recoveredWatermark = -1;
+  #recovering = false;
   #state: HarnessSessionState = {};
   #requested: RequestedConfiguration;
   #transport: AntigravityAcpTransportLike | undefined;
@@ -405,6 +423,20 @@ export class AntigravitySession implements HarnessSession {
       emit: (event) => this.#emit(event),
     });
     if (options.nativeRef) void this.#refreshStoredTitle(options.nativeRef.nativeSessionId);
+    this.#backgroundTasks = new AntigravityBackgroundTasks({
+      nativeSessionId: () => this.nativeRef?.nativeSessionId,
+      home: antigravityHome(options.environment),
+      outputLimit: options.adapter.toolOutputLimit ?? 64_000,
+      ...(options.adapter.backgroundTaskPollIntervalMs !== undefined
+        ? { pollIntervalMs: options.adapter.backgroundTaskPollIntervalMs }
+        : {}),
+      emit: (event) => this.#emit(event),
+      onTaskFinished: ({ taskId, stepIndex }) => {
+        if (this.#closed || this.#faulted) return;
+        if (this.#active?.promptPhase === "submitted") return;
+        this.#wakes?.expectWake({ taskId, stepIndex });
+      },
+    });
   }
   get initialState(): HarnessSessionState {
     return { ...this.#state };
@@ -421,6 +453,8 @@ export class AntigravitySession implements HarnessSession {
       !!this.#opening ||
       !!this.#configurationQueue ||
       this.#subagents.running ||
+      this.#backgroundTasks.running ||
+      this.#recovering ||
       this.#pending.size > 0 ||
       [...this.#toolOwners.values()].some((turn) => turn.detachedToolCallIds.size > 0)
     );
@@ -428,7 +462,9 @@ export class AntigravitySession implements HarnessSession {
   hasBackgroundWork(): boolean {
     return (
       this.#subagents.running ||
+      this.#backgroundTasks.running ||
       !!this.#wakes?.observing ||
+      this.#recovering ||
       this.#pending.size > 0 ||
       [...this.#toolOwners.values()].some((turn) => turn.detachedToolCallIds.size > 0)
     );
@@ -440,6 +476,7 @@ export class AntigravitySession implements HarnessSession {
       !this.#opening &&
       !this.#configurationQueue &&
       !this.#subagents.running &&
+      !this.#backgroundTasks.running &&
       !this.#historyOperation &&
       !this.#closed &&
       !this.#faulted &&
@@ -605,6 +642,21 @@ export class AntigravitySession implements HarnessSession {
           home,
           cursor,
           outputLimit: this.#options.adapter.toolOutputLimit,
+          ...(this.#options.adapter.wakePollIntervalMs !== undefined
+            ? { pollIntervalMs: this.#options.adapter.wakePollIntervalMs }
+            : {}),
+          ...(this.#options.adapter.wakeCommitWaitMs !== undefined
+            ? { commitWaitMs: this.#options.adapter.wakeCommitWaitMs }
+            : {}),
+          ...(this.#options.adapter.wakeActivityLeaseMs !== undefined
+            ? { activityLeaseMs: this.#options.adapter.wakeActivityLeaseMs }
+            : {}),
+          ...(this.#options.adapter.wakeExpectWaitMs !== undefined
+            ? { expectWakeWaitMs: this.#options.adapter.wakeExpectWaitMs }
+            : {}),
+          ...(this.#options.adapter.wakeRunningHardCapMs !== undefined
+            ? { runningHardCapMs: this.#options.adapter.wakeRunningHardCapMs }
+            : {}),
           canPublish: () => this.#active?.promptPhase !== "returned",
           streamedIntoPrompt: (startedAtMs) => {
             if (startedAtMs === undefined) return false;
@@ -620,6 +672,9 @@ export class AntigravitySession implements HarnessSession {
             );
           },
           publish: (snapshot) => this.#emit({ type: "turn.autonomous.completed", snapshot }),
+          onExpectedWakeTimeout: () => {
+            void this.#maybeRecoverDanglingBackgroundTask();
+          },
         });
       }
       transport.setSessionEventHandler((event) => {
@@ -655,6 +710,15 @@ export class AntigravitySession implements HarnessSession {
         this.#setLocatorPermissionMode(this.#requested.permissionModeId);
       }
       if (!this.#configurationQueue) this.#publishState();
+      if (
+        !this.#closed &&
+        !this.#faulted &&
+        !this.#active &&
+        !this.#configurationQueue &&
+        !this.#historyOperation
+      ) {
+        void this.#maybeRecoverDanglingBackgroundTask();
+      }
     } catch (error) {
       await transport.close().catch(() => undefined);
       if (this.#transport === transport) {
@@ -1181,6 +1245,7 @@ export class AntigravitySession implements HarnessSession {
     )
       return err("invalidRequest", "Prompt and Turn ID must not be empty");
     try {
+      this.#wakes?.cancelExpectedWake();
       this.#postPromptWake = false;
       const turn: ActiveTurn = {
         turnId: command.turnId,
@@ -1419,6 +1484,7 @@ export class AntigravitySession implements HarnessSession {
       turn.tracker = new AntigravityToolTracker({
         turnId: turn.turnId,
         cwd: this.#options.cwd,
+        nativeSessionId: ref.nativeSessionId,
         ...(this.#options.adapter.toolOutputLimit !== undefined
           ? { outputLimit: this.#options.adapter.toolOutputLimit }
           : {}),
@@ -1432,6 +1498,8 @@ export class AntigravitySession implements HarnessSession {
           if (this.#isCurrent(turn) || turn.detachedToolCallIds.size > 0) this.#emit(event);
         },
         onSubagentSpawned: (id, item) => this.#subagents.track(id, item),
+        onBackgroundTaskSpawned: (task) => this.#backgroundTasks.track(task),
+        onBackgroundTaskKilled: (taskId) => this.#backgroundTasks.markCancelled(taskId),
       });
       const before = this.#confirmedCount;
       turn.dbPath = file;
@@ -1905,6 +1973,91 @@ export class AntigravitySession implements HarnessSession {
       owner.detachedToolCallIds.clear();
     }
   }
+  #recoveredSteps(nativeSessionId: string): Set<number> {
+    return this.#options.recoveredStepsFor?.(nativeSessionId) ?? this.#localRecoveredSteps;
+  }
+  async #maybeRecoverDanglingBackgroundTask(): Promise<void> {
+    if (
+      this.#closed ||
+      this.#faulted ||
+      this.#active ||
+      this.#configurationQueue ||
+      this.#historyOperation ||
+      this.#backgroundTasks.running ||
+      this.#recovering ||
+      !this.#transport
+    ) {
+      return;
+    }
+    const ref = this.nativeRef;
+    if (!ref) return;
+    this.#recovering = true;
+    try {
+      const home = antigravityHome(this.#options.environment);
+      const dangling = await findDanglingBackgroundTaskCompletion(home, ref.nativeSessionId);
+      if (
+        !dangling ||
+        this.#closed ||
+        this.#faulted ||
+        this.#active ||
+        this.#configurationQueue ||
+        this.#historyOperation ||
+        this.#backgroundTasks.running ||
+        !this.#transport
+      ) {
+        return;
+      }
+      const recovered = this.#recoveredSteps(ref.nativeSessionId);
+      if (dangling.stepIndex <= this.#recoveredWatermark || recovered.has(dangling.stepIndex)) {
+        return;
+      }
+      const status = await readNativeConversationStatus(home, ref.nativeSessionId);
+      if (
+        this.#closed ||
+        this.#faulted ||
+        this.#active ||
+        this.#configurationQueue ||
+        this.#historyOperation ||
+        this.#backgroundTasks.running ||
+        !this.#transport
+      ) {
+        return;
+      }
+      if (status === "running") {
+        const lastTaskId = dangling.taskIds.at(-1);
+        this.#wakes?.expectWake({
+          stepIndex: dangling.stepIndex,
+          ...(lastTaskId !== undefined ? { taskId: lastTaskId } : {}),
+        });
+        return;
+      }
+      recovered.add(dangling.stepIndex);
+      this.#recoveredWatermark = Math.max(this.#recoveredWatermark, dangling.stepIndex);
+      const turnId = hostTurnIdSchema.parse(`recovery-${dangling.stepIndex}-${randomUUID()}`);
+      const command: TurnStartCommand = {
+        type: "turn.start",
+        turnId,
+        input: [{ type: "text", text: buildBackgroundRecoveryPrompt(dangling) }],
+      };
+      this.#wakes?.cancelExpectedWake();
+      this.#postPromptWake = false;
+      const turn: ActiveTurn = {
+        turnId,
+        cancelled: false,
+        ended: false,
+        promptPhase: "notSubmitted",
+        accounting: new AbortController(),
+        detachedToolCallIds: new Set(),
+        emittedCompactions: new Set(),
+      };
+      this.#active = turn;
+      this.#emit({ type: "turn.autonomous.started", turnId, input: [] });
+      this.#emit({ type: "turn.started", turnId });
+      await this.#runTurn(turn, command, false);
+    } finally {
+      this.#recovering = false;
+    }
+  }
   handleTransportFault(error: AntigravityTransportError): void {
     if (this.#closed || this.#faulted) return;
     this.#faulted = true;
@@ -1914,10 +2067,11 @@ export class AntigravitySession implements HarnessSession {
     this.#wakes?.close();
     this.#postPromptWake = false;
     this.#closeInteractions("cancelled");
-    if (this.#active)
-      this.#finish(this.#active, { status: "failed", error: normalizeAntigravityError(error) });
-    this.#settleDetachedOwners({ status: "failed", error: normalizeAntigravityError(error) });
-    this.#emit({ type: "session.faulted", error: normalizeAntigravityError(error) });
+    const normalized = normalizeAntigravityError(error);
+    this.#backgroundTasks.abandonAll({ status: "failed", error: normalized });
+    if (this.#active) this.#finish(this.#active, { status: "failed", error: normalized });
+    this.#settleDetachedOwners({ status: "failed", error: normalized });
+    this.#emit({ type: "session.faulted", error: normalized });
     this.#channel.end();
     this.#subagents.stop();
     void this.#transport?.close().catch(() => undefined);
@@ -1937,6 +2091,7 @@ export class AntigravitySession implements HarnessSession {
     this.#postPromptWake = false;
     this.#pendingTitle = undefined;
     this.#closeInteractions("cancelled");
+    this.#backgroundTasks.abandonAll({ status: "cancelled", reason: "Session closed" });
     const active = this.#active;
     if (active) this.#finish(active, { status: "cancelled", reason: "Session closed" });
     this.#settleDetachedOwners({ status: "cancelled", reason: "Session closed" });
@@ -1944,7 +2099,11 @@ export class AntigravitySession implements HarnessSession {
     this.#transport?.setSessionEventHandler(null);
     this.#transport?.setSessionInteractionHandler(null);
     if (active?.promptPhase === "submitted") await this.#transport?.cancel().catch(() => undefined);
-    await Promise.all([this.#transport?.close(), this.#subagents.close()]);
+    await Promise.all([
+      this.#transport?.close(),
+      this.#subagents.close(),
+      this.#backgroundTasks.close(),
+    ]);
     this.#options.onClosed(this);
   }
 }
@@ -1999,6 +2158,7 @@ export class AntigravityAdapter implements HarnessAdapter {
   readonly usageStatistics: ReturnType<typeof createAntigravityUsageStatistics>;
   readonly #environment: NodeJS.ProcessEnv;
   readonly #sessions = new Set<AntigravitySession>();
+  readonly #recoveredStepsBySession = new Map<string, Set<number>>();
   readonly #cache = new Map<string, HarnessInspection>();
   readonly #inflight = new Map<string, Promise<HarnessInspection>>();
   readonly #abort = new AbortController();
@@ -2203,6 +2363,14 @@ export class AntigravityAdapter implements HarnessAdapter {
       quota: {
         read: (modelId) => (this.#quota ? projectAntigravityQuota(this.#quota, modelId) : null),
         refresh: () => void this.#refreshQuota().catch(() => undefined),
+      },
+      recoveredStepsFor: (nativeSessionId) => {
+        let steps = this.#recoveredStepsBySession.get(nativeSessionId);
+        if (!steps) {
+          steps = new Set<number>();
+          this.#recoveredStepsBySession.set(nativeSessionId, steps);
+        }
+        return steps;
       },
       onClosed: (closed) => this.#sessions.delete(closed),
     });

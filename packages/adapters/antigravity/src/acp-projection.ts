@@ -37,6 +37,11 @@ import {
 import { createTwoFilesPatch } from "diff";
 
 import type { AntigravityAcpConfigOption, AntigravityAcpEvent } from "./acp-types.js";
+import {
+  detectAntigravityBackgroundTask,
+  extractKilledBackgroundTaskId,
+  type DetachedAntigravityTask,
+} from "./background-tasks.js";
 import type { NativeCompactionEvent, NativeReplayEvent } from "./native-replay.js";
 import {
   isDiscoveredAntigravitySkill,
@@ -318,17 +323,22 @@ export function buildAcpElicitationResponse(params: {
 export interface AntigravityToolTrackerOptions {
   turnId: HostTurnId;
   cwd: string;
+  nativeSessionId?: string;
   outputLimit?: number;
   parentConfiguration?: SubagentConfiguration;
   emit: (event: HostEvent) => void;
   onSubagentSpawned?: (subagentId: string, item: HostItemSnapshot) => void;
+  onBackgroundTaskSpawned?: (task: DetachedAntigravityTask) => void;
+  onBackgroundTaskKilled?: (taskId: string) => void;
 }
 type ToolEvent = Extract<AntigravityAcpEvent, { type: "tool.call" | "tool.update" }>;
 interface ToolState {
   event: ToolEvent;
   item: HostItem | null;
-  snapshot?: HostItemSnapshot;
+  startedAtMs: number;
   detached?: boolean;
+  backgroundTaskDetached?: boolean;
+  snapshot?: HostItemSnapshot;
   diffItem?: Extract<HostItem, { type: "fileChange" }>;
   diffSnapshot?: HostItemSnapshot;
 }
@@ -347,17 +357,21 @@ export class AntigravityToolTracker {
 
   activeToolItemId(toolCallId: string): HostItemId | undefined {
     const state = this.#tools.get(toolCallId);
-    return state && !state.snapshot && state.item?.type === "toolExecution"
+    return state &&
+      !state.snapshot &&
+      !state.detached &&
+      !state.backgroundTaskDetached &&
+      state.item?.type === "toolExecution"
       ? state.item.itemId
       : undefined;
   }
 
   handleToolEvent(event: ToolEvent): void {
     let state = this.#tools.get(event.toolCallId);
-    if (state?.snapshot) return;
+    if (state?.snapshot || state?.backgroundTaskDetached) return;
     const previous = state?.item;
     if (!state) {
-      state = { event, item: null };
+      state = { event, item: null, startedAtMs: Date.now() };
       this.#tools.set(event.toolCallId, state);
     } else
       state.event = {
@@ -395,6 +409,64 @@ export class AntigravityToolTracker {
       args,
       this.options.cwd,
     );
+    const backgroundTask =
+      terminal && !failed && this.options.onBackgroundTaskSpawned
+        ? detectAntigravityBackgroundTask({
+            toolName: name,
+            kind: tool.kind,
+            args,
+            output: fullOutput,
+            nativeSessionId: this.options.nativeSessionId,
+          })
+        : null;
+    if (backgroundTask) {
+      const detachedItem: Extract<HostItem, { type: "commandExecution" | "toolExecution" }> =
+        command || tool.kind === "execute" || compactToolName(name) === "runcommand"
+          ? {
+              type: "commandExecution",
+              itemId,
+              command: command?.command ?? tool.title ?? name,
+              cwd: command?.cwd ?? this.options.cwd,
+              ...(previous?.type === "commandExecution" && previous.output
+                ? {
+                    output: previous.output,
+                    ...(previous.outputTruncated ? { outputTruncated: true } : {}),
+                  }
+                : {}),
+            }
+          : {
+              type: "toolExecution",
+              itemId,
+              toolName: name,
+              arguments: (args ?? null) as JsonValue,
+            };
+      state.item = detachedItem;
+      if (!previous)
+        this.#emit({ type: "item.started", turnId: this.options.turnId, item: detachedItem });
+      this.#diff(state, tool.content, limit);
+      if (state.diffItem && !state.diffSnapshot) {
+        state.diffSnapshot = { item: state.diffItem, outcome };
+        this.#emit({
+          type: "item.completed",
+          turnId: this.options.turnId,
+          snapshot: state.diffSnapshot,
+        });
+      }
+      state.backgroundTaskDetached = true;
+      this.#emit({ type: "item.detached", turnId: this.options.turnId, itemId });
+      this.options.onBackgroundTaskSpawned?.({
+        taskId: backgroundTask.taskId,
+        taskNumber: backgroundTask.taskNumber,
+        turnId: this.options.turnId,
+        item: detachedItem,
+        startedAtMs: state.startedAtMs,
+      });
+      return;
+    }
+    if (terminal && !failed && this.options.onBackgroundTaskKilled) {
+      const killedTaskId = extractKilledBackgroundTaskId(name, args);
+      if (killedTaskId) this.options.onBackgroundTaskKilled(killedTaskId);
+    }
     if (command || tool.kind === "execute" || compactToolName(name) === "runcommand") {
       state.item = {
         type: "commandExecution",
@@ -565,7 +637,7 @@ export class AntigravityToolTracker {
 
   finishPending(outcome: HostItemOutcome): void {
     for (const state of this.#tools.values()) {
-      if (state.snapshot || state.detached) continue;
+      if (state.snapshot || state.detached || state.backgroundTaskDetached) continue;
       if (state.item?.type === "subagentDelegation")
         state.item = {
           ...state.item,
@@ -589,6 +661,7 @@ export class AntigravityToolTracker {
       if (
         state.snapshot ||
         state.detached ||
+        state.backgroundTaskDetached ||
         (state.item?.type !== "commandExecution" &&
           !(
             state.item?.type === "toolExecution" &&
