@@ -57,6 +57,7 @@ export function defaultProjections(): Record<string, unknown> {
     title: null,
     goal: null,
     codexhostUsage: null,
+    codexhostWatching: null,
     tokenUsage: {
       uncachedInputTokens: 0,
       outputTokens: 0,

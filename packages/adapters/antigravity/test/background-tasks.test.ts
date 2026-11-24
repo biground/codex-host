@@ -559,6 +559,13 @@ describe("Antigravity background command tracking, wake lease, and recovery", ()
     );
 
     await vi.waitFor(() => expect(session.hasBackgroundWork()).toBe(false));
+    const bgChanges = events(outputs).filter(
+      (event) => event.type === "session.backgroundWork.changed",
+    );
+    expect(bgChanges).toEqual([
+      { type: "session.backgroundWork.changed", active: true },
+      { type: "session.backgroundWork.changed", active: false },
+    ]);
   });
 
   it("marks non-zero background exit codes as failed and settles manage_task kill cleanly", async () => {
@@ -997,6 +1004,13 @@ describe("Antigravity background command tracking, wake lease, and recovery", ()
       expect(events(outputs).filter((event) => event.type === "turn.completed")).toHaveLength(2),
     );
     await vi.waitFor(() => expect(session.hasBackgroundWork()).toBe(false));
+    const bgChanges = events(outputs).filter(
+      (event) => event.type === "session.backgroundWork.changed",
+    );
+    expect(bgChanges).toEqual([
+      { type: "session.backgroundWork.changed", active: true },
+      { type: "session.backgroundWork.changed", active: false },
+    ]);
   });
 
   it.each(["fault", "close"] as const)(

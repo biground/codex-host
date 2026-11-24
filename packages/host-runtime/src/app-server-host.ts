@@ -158,6 +158,12 @@ import {
   THREAD_STEER_DELIVERY_PARAM,
   THREAD_NAME_AUTO_SOURCE_PARAM,
   THREAD_STEER_STRICT_TARGET_PARAM,
+  THREAD_WATCHING_READ_METHOD,
+  THREAD_WATCHING_UPDATED_METHOD,
+  threadWatchingReadParamsSchema,
+  threadWatchingReadResultSchema,
+  threadWatchingUpdatedNotificationSchema,
+  type ThreadWatchingEntry,
   REASONING_TRANSCRIPT_COMMAND,
   permissionModeFixedAtCreate,
   sameHarnessModelRef,
@@ -461,6 +467,8 @@ export interface AppServerHostOptions {
   consoleOpener?: HostConsoleOpener;
   webOpener?: HostWebOpener;
   onDelegationApi?: (api: DelegationControlRegistration) => (() => void) | undefined;
+  watchingSubscribers?: () => ReadonlyMap<string, { watchCount: number; watchTargets: string[] }>;
+  onWatchesChanged?: (listener: () => void) => () => void;
   /** Shared by all Hosts of one runtime; defaults to the bundled snapshot only. */
   modelPrices?: ModelPriceCatalog;
   /** Machine-wide usage statistics; one per runtime, read from the loaded Harness plugins. */
@@ -1046,6 +1054,10 @@ export class AppServerHost {
     }
   >();
   #manualCompactionTurns = new WeakMap<ExternalThread, HostTurnId>();
+  #unsubscribeWatchesChanged: (() => void) | undefined;
+  #lastThreadWatchingKey = JSON.stringify({});
+  #lastThreadWatchingThreads: Record<string, ThreadWatchingEntry> = {};
+  #sharedThreadWatching: Record<string, ThreadWatchingEntry> = {};
   #closeRequested = false;
   readonly #pluginLoadAbort = new AbortController();
   #pluginLoading: Promise<void> | undefined;
@@ -1215,6 +1227,7 @@ export class AppServerHost {
         this.#pendingOfficialDeletes.clear();
         this.#activeOfficialTurns.clear();
         this.#treeWatch?.resetOfficial();
+        this.#publishThreadWatching();
         this.#client.resetNativeSession();
         for (const listener of this.#nativeSettingsNotifications) listener(null);
         this.#signalActiveWorkChanged();
@@ -1306,10 +1319,12 @@ export class AppServerHost {
       hasRunningDescendants: (threadId) => this.#hasRunningSubagents(threadId),
       idleRelease: {
         queue: this.#desktopRequests,
-        onClosed: (thread) => this.#resolveThreadInteractions(thread),
+        onClosed: async (thread) => {
+          await this.#resolveThreadInteractions(thread);
+          this.#publishThreadWatching();
+        },
         canRelease: (thread) =>
-          !this.#hasRunningSubagents(thread.id) &&
-          !thread.session.hasBackgroundWork?.() &&
+          !this.#hasExternalBackgroundWork(thread) &&
           !this.#externalSteering.hasPending(thread.id) &&
           !this.#pendingExternalCommandRequests.has(thread.id) &&
           ![...this.#pendingDesktopApprovals.values()].some(
@@ -1349,6 +1364,7 @@ export class AppServerHost {
       officialThreadMetadata: (threadId) => this.#readOfficialThreadMetadata(threadId),
       activeOfficialParents: () => [...this.#activeOfficialTurns.keys()],
       externalThreadBusy: (thread) => this.#externalThreadBusy(thread),
+      externalBackgroundBusy: (thread) => this.#hasExternalBackgroundWork(thread),
       pendingQuestions: (threadId) => this.#pendingDelegationQuestions(threadId),
     });
     options.sharedThreads?.setLocalOwnershipProbe((threadId) => this.#hasLocalThread(threadId));
@@ -1468,9 +1484,15 @@ export class AppServerHost {
       setThreadStatus: (thread, status) => this.#setThreadStatus(thread, status),
       signalActiveWorkChanged: () => this.#signalActiveWorkChanged(),
       hasRunningSubagents: (parentThreadId) => this.#hasRunningSubagents(parentThreadId),
+      hasBackgroundWork: (thread) => this.#hasExternalBackgroundWork(thread),
       publishExternalQueue: (threadId) => this.#publishExternalQueue(threadId),
       startNextQueuedExternalTurn: (thread) => this.#startNextQueuedExternalTurn(thread),
     });
+    this.#unsubscribeWatchesChanged = options.sharedThreads?.options.delegateCreates
+      ? undefined
+      : options.onWatchesChanged?.(() => {
+          this.#publishThreadWatching();
+        });
     const desktopEnvironment = options.environment ?? process.env;
     this.hostExtensions =
       desktopEnvironment.CODEXHOST_REMOTE_SSH_MANAGED === "1"
@@ -1748,6 +1770,8 @@ export class AppServerHost {
       await this.#closeAdapters();
       this.#unregisterDelegationApi?.();
       this.#unregisterDelegationApi = undefined;
+      this.#unsubscribeWatchesChanged?.();
+      this.#unsubscribeWatchesChanged = undefined;
       this.#unsubscribeOfficialState?.();
       this.#unsubscribeOfficialState = undefined;
       if (this.#options.closeMappingStoreOnExit !== false) {
@@ -1772,6 +1796,17 @@ export class AppServerHost {
     // independently and must not hold up the official initialization.
     void this.#waitForPlugins().then(() => this.#attachUsageStatistics());
     this.#options.sharedThreads?.start((message) => {
+      if (
+        this.#options.sharedThreads?.options.delegateCreates &&
+        message.method === THREAD_WATCHING_UPDATED_METHOD
+      ) {
+        const parsed = threadWatchingUpdatedNotificationSchema.safeParse(message.params);
+        if (parsed.success) {
+          this.#sharedThreadWatching = parsed.data.threads;
+          this.#publishThreadWatching();
+          return;
+        }
+      }
       void this.#writer.json(message).catch((error: unknown) => this.#diagnose(error));
     });
     if (this.#closeRequested) await this.#closeOfficialRuntime();
@@ -1823,6 +1858,8 @@ export class AppServerHost {
       this.#routeObservationTracker.clear();
       this.#unregisterDelegationApi?.();
       this.#unregisterDelegationApi = undefined;
+      this.#unsubscribeWatchesChanged?.();
+      this.#unsubscribeWatchesChanged = undefined;
       this.#unsubscribeOfficialState?.();
       this.#unsubscribeOfficialState = undefined;
       if (this.#options.closeMappingStoreOnExit !== false) {
@@ -2247,6 +2284,25 @@ export class AppServerHost {
     }
     if (request.method === THREAD_CATALOG_READ_METHOD) {
       this.#dispatchDesktopReply(request, () => this.#readThreadCatalog(request));
+      return;
+    }
+    if (request.method === THREAD_WATCHING_READ_METHOD) {
+      const parsed = threadWatchingReadParamsSchema.safeParse(request.params ?? {});
+      if (!parsed.success) {
+        await this.#writer.json(rpcError(request, -32602, "Invalid thread watching params"));
+        return;
+      }
+      this.#dispatchDesktopReply(request, async () => {
+        if (this.#options.sharedThreads?.options.delegateCreates) {
+          const reply = await this.#options.sharedThreads.request(THREAD_WATCHING_READ_METHOD, {});
+          const parsedReply = threadWatchingReadResultSchema.safeParse(reply.result);
+          if (parsedReply.success) this.#sharedThreadWatching = parsedReply.data.threads;
+        }
+        const result = threadWatchingReadResultSchema.parse({
+          threads: this.#computeThreadWatching(),
+        });
+        await this.#writer.json(rpcEnvelope(request, { result: jsonValueSchema.parse(result) }));
+      });
       return;
     }
     if (this.#options.externalOnly && request.method === "codexhost/shared-threads/placements") {
@@ -2691,8 +2747,10 @@ export class AppServerHost {
     if (typeof threadId !== "string" || !isRecord(turn)) return;
     // Run after output is flushed (or immediately for the non-rendering owner).
     // An old terminal must never clear a newer active Turn.
-    if (this.#activeOfficialTurns.get(threadId) === turn.id)
+    if (this.#activeOfficialTurns.get(threadId) === turn.id) {
       this.#activeOfficialTurns.delete(threadId);
+      this.#publishThreadWatching();
+    }
     this.#signalActiveWorkChanged();
   }
 
@@ -2842,6 +2900,7 @@ export class AppServerHost {
     if (value.method === "thread/closed" && typeof params.threadId === "string") {
       await this.#questions.closeWhere((request) => request.threadId === params.threadId);
       this.#activeOfficialTurns.delete(params.threadId);
+      this.#publishThreadWatching();
       this.#signalActiveWorkChanged();
       return;
     }
@@ -2849,6 +2908,7 @@ export class AppServerHost {
       const turn = isRecord(params.turn) ? params.turn : null;
       if (turn && typeof turn.id === "string") {
         this.#activeOfficialTurns.set(params.threadId, turn.id);
+        this.#publishThreadWatching();
       }
     }
     if (value.method === "turn/completed" && typeof params.threadId === "string") {
@@ -6372,6 +6432,108 @@ export class AppServerHost {
     return thread.running || this.#externalSteering.hasPending(thread.id);
   }
 
+  #hasOpenDetachedTool(thread: ExternalThread): boolean {
+    return [...thread.projectedTurns.values()].some(({ projector }) =>
+      projector.hasOpenDetachedTool(),
+    );
+  }
+
+  #hasExternalBackgroundWork(thread: ExternalThread): boolean {
+    return (
+      this.#hasOpenDetachedTool(thread) ||
+      (!thread.sessionUnavailable && Boolean(thread.session.hasBackgroundWork?.())) ||
+      this.#hasRunningSubagents(thread.id)
+    );
+  }
+
+  #hasExternalWatchingWork(thread: ExternalThread): boolean {
+    if (thread.running || thread.activeTurnId !== null) return false;
+    return (
+      this.#hasOpenDetachedTool(thread) ||
+      (!thread.sessionUnavailable &&
+        Boolean(thread.session.hasBackgroundWork?.()) &&
+        !this.#hasRunningSubagents(thread.id))
+    );
+  }
+
+  #computeThreadWatching(): Record<string, ThreadWatchingEntry> {
+    if (!this.#externalRuntime) return {};
+    const result: Record<string, ThreadWatchingEntry> = {};
+    if (this.#options.sharedThreads?.options.delegateCreates) {
+      for (const [threadId, entry] of Object.entries(this.#sharedThreadWatching)) {
+        if (this.#activeOfficialTurns.has(threadId)) continue;
+        result[threadId] = entry;
+      }
+      return result;
+    }
+    const subscribers = this.#options.watchingSubscribers?.();
+    if (subscribers) {
+      for (const [threadId, watch] of subscribers) {
+        if (watch.watchCount <= 0) continue;
+        if (this.#activeOfficialTurns.has(threadId)) continue;
+        const external = this.#externalRuntime.get(threadId);
+        if (external && (external.running || external.activeTurnId !== null)) continue;
+        result[threadId] = {
+          watchCount: watch.watchCount,
+          ...(watch.watchTargets.length > 0 ? { watchTargets: [...watch.watchTargets] } : {}),
+          backgroundWork: false,
+        };
+      }
+    }
+    for (const thread of this.#externalRuntime.values()) {
+      if (!this.#hasExternalWatchingWork(thread)) continue;
+      const existing = result[thread.id];
+      result[thread.id] = existing
+        ? { ...existing, backgroundWork: true }
+        : { watchCount: 0, backgroundWork: true };
+    }
+    return result;
+  }
+
+  #publishThreadWatching(): void {
+    if (!this.#externalRuntime) return;
+    const threads = this.#computeThreadWatching();
+    const serialized = JSON.stringify(threads);
+    if (serialized === this.#lastThreadWatchingKey) return;
+    const previous = this.#lastThreadWatchingThreads;
+    this.#lastThreadWatchingKey = serialized;
+    this.#lastThreadWatchingThreads = threads;
+    const changedIds = new Set<string>();
+    for (const id of new Set([...Object.keys(previous), ...Object.keys(threads)])) {
+      if (JSON.stringify(previous[id] ?? null) !== JSON.stringify(threads[id] ?? null)) {
+        changedIds.add(id);
+      }
+    }
+    for (const id of changedIds) {
+      this.clientEvents.changed(id, THREAD_WATCHING_UPDATED_METHOD);
+    }
+    void this.#writer
+      .json({
+        method: THREAD_WATCHING_UPDATED_METHOD,
+        params: jsonValueSchema.parse({ threads }),
+      })
+      .catch((error: unknown) => this.#diagnose(error));
+  }
+
+  async #settleBackgroundWorkIfIdle(thread: ExternalThread): Promise<void> {
+    this.#publishThreadWatching();
+    if (thread.running || thread.activeTurnId !== null || this.#hasExternalBackgroundWork(thread)) {
+      return;
+    }
+    const delegation = await this.#repository.getDelegationByChild(thread.record.hostThreadId);
+    if (delegation && delegation.status === "running") {
+      const last = thread.turns.at(-1);
+      const status =
+        last?.status === "failed"
+          ? "failed"
+          : last?.status === "interrupted"
+            ? "interrupted"
+            : "completed";
+      await this.#repository.setDelegationStatus(delegation.delegationId, status);
+    }
+    this.#notifyThreadIdle(thread.id);
+  }
+
   #externalSessionAvailable(thread: ExternalThread): boolean {
     return (
       !this.#closeRequested &&
@@ -7358,6 +7520,7 @@ export class AppServerHost {
       if (!turn) {
         // A concurrent native-history read may already have installed this Turn.
         this.clientEvents.changed(thread.id, "turn/completed");
+        await this.#settleBackgroundWorkIfIdle(thread);
         return;
       }
       const threadId = thread.id;
@@ -7383,6 +7546,7 @@ export class AppServerHost {
         await this.#writer.json({ method: "item/completed", params: { threadId, turnId, item } });
       }
       await this.#writer.json({ method: "turn/completed", params: { threadId, turn } });
+      await this.#settleBackgroundWorkIfIdle(thread);
       return;
     }
     if (thread.sessionUnavailable && "turnId" in event) {
@@ -7475,6 +7639,11 @@ export class AppServerHost {
       } catch (error) {
         this.#diagnose(`External Session title could not be persisted: ${errorMessage(error)}`);
       }
+      return;
+    }
+    if (event.type === "session.backgroundWork.changed") {
+      if (this.#externalRuntime.get(thread.id) !== thread) return;
+      await this.#settleBackgroundWorkIfIdle(thread);
       return;
     }
     if (event.type === "session.state.changed") {
@@ -7586,6 +7755,9 @@ export class AppServerHost {
       await this.#setSubagentThreadStatus(record.hostThreadId, status);
       if (!thread.running && !thread.activeTurnId && !this.#hasRunningSubagents(thread.id)) {
         await this.#setThreadStatus(thread, { type: "idle" });
+        await this.#settleBackgroundWorkIfIdle(thread);
+      } else {
+        this.#publishThreadWatching();
       }
       return;
     }
@@ -7603,6 +7775,7 @@ export class AppServerHost {
         }
       }
       await this.#retireSubagentsAfterFailure(thread);
+      await this.#settleBackgroundWorkIfIdle(thread);
       // Idle Threads must not keep a dead Session; the next open restores from disk.
       if (
         !thread.running &&
@@ -7624,6 +7797,11 @@ export class AppServerHost {
       );
     }
     await this.#turnProjection.project(thread, event);
+    if (event.type === "item.detached") {
+      this.#publishThreadWatching();
+    } else if (event.type === "item.completed") {
+      await this.#settleBackgroundWorkIfIdle(thread);
+    }
   }
 
   async #materializeSubagent(
@@ -8325,7 +8503,10 @@ export class AppServerHost {
       emittedAtMs: Date.now(),
       params: { threadId: thread.id, status },
     });
-    if (status.type === "idle") this.#notifyThreadIdle(thread.id);
+    this.#publishThreadWatching();
+    if (status.type === "idle" && !this.#hasExternalBackgroundWork(thread)) {
+      this.#notifyThreadIdle(thread.id);
+    }
   }
 
   #latestCompletedTurnId(thread: ExternalThread): HostTurnId | null {

@@ -61,6 +61,7 @@ export interface AntigravitySubagentOptions {
   pollIntervalMs?: number;
   observationTimeoutMs?: number;
   emit(event: HostEvent): void;
+  onRunningChange?(): void;
 }
 
 export class AntigravitySubagents {
@@ -70,11 +71,18 @@ export class AntigravitySubagents {
   #timer: ReturnType<typeof setInterval> | undefined;
   #refreshing: Promise<void> | undefined;
   #stopped = false;
+  #wasRunning = false;
   constructor(readonly options: AntigravitySubagentOptions) {}
   get running(): boolean {
     return [...this.#states.values()].some(
       (state) => state.status === "running" || state.status === "pending",
     );
+  }
+  #syncRunning(): void {
+    const active = this.running;
+    if (active === this.#wasRunning) return;
+    this.#wasRunning = active;
+    this.options.onRunningChange?.();
   }
   state(id: string): HostSubagentState | undefined {
     return this.#states.get(id);
@@ -97,6 +105,7 @@ export class AntigravitySubagents {
       status: "running",
     });
     this.#unavailableSince.delete(id);
+    this.#syncRunning();
     if (!this.#timer) {
       this.#timer = setInterval(() => {
         void this.refresh();
@@ -123,6 +132,7 @@ export class AntigravitySubagents {
       status: state.status,
       ...(state.resultSummary ? { resultSummary: state.resultSummary } : {}),
     });
+    this.#syncRunning();
   }
   #expireUnavailable(id: string, previous: HostSubagentState): boolean {
     const since = this.#unavailableSince.get(id) ?? Date.now();

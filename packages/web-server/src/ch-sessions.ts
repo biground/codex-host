@@ -7,6 +7,7 @@ import {
   THREAD_ARCHIVE_CONFIRM_METHOD,
   THREAD_STEER_STRICT_TARGET_FIELD,
   THREAD_STEER_STRICT_TARGET_PARAM,
+  THREAD_WATCHING_READ_METHOD,
   WEB_ACTIVE_TURN_PROJECTION,
   WEB_FOLLOW_PROJECTION_KEYS,
   WEB_HANDOFF_PROJECTION,
@@ -24,9 +25,11 @@ import {
   threadInspectionSchema,
   threadArchiveConfirmResultSchema,
   threadUsageInspectionSchema,
+  threadWatchingReadResultSchema,
   type HarnessDisplayEntries,
   type ThreadCatalogReadParams,
   type ThreadHandoffMetadata,
+  type ThreadWatchingEntry,
 } from "@codexhost/shared-contracts";
 import type { ChHostClient, ChProjectSnapshot } from "./ch-host-client.ts";
 import { ChHarnessCatalog, type ModelSelection } from "./ch-harness-catalog.ts";
@@ -126,6 +129,10 @@ export class ChSessions {
   private readonly skills: WebSkills;
   private readonly titleRequests = new Set<string>();
   private readonly interactions: ChInteractions | undefined;
+  private watching = new Map<string, ThreadWatchingEntry>();
+  private watchingSupported = true;
+  private refreshingWatching: Promise<void> | undefined;
+  private watchingDirty = false;
   private hostOnline = true;
   private hostEpoch: string | undefined;
   constructor(
@@ -187,6 +194,9 @@ export class ChSessions {
           usage: (id) => {
             const view = this.threads.view(id);
             if (view) this.loadUsage(view, true);
+          },
+          watching: () => {
+            void this.refreshWatching();
           },
           catalog: async () => {
             await this.refresh();
@@ -358,6 +368,7 @@ export class ChSessions {
           return undefined;
         }
       }),
+      this.refreshWatching(false),
     ]);
     if (this.closed) return;
     const found = new Map(snapshot.threads.map((row) => [row.id, row]));
@@ -542,6 +553,84 @@ export class ChSessions {
    * streams. Re-emitting every row makes each browser rebuild its entire
    * catalog thousands of times and starves interactive history frames.
    */
+  private async refreshWatching(publishDelta = true): Promise<void> {
+    if (this.closed || !this.watchingSupported) return;
+    if (this.refreshingWatching) {
+      this.watchingDirty = true;
+      await this.refreshingWatching;
+      return;
+    }
+    const run = async (): Promise<void> => {
+      do {
+        this.watchingDirty = false;
+        let next: Map<string, ThreadWatchingEntry>;
+        try {
+          const parsed = threadWatchingReadResultSchema.parse(
+            await this.host.request(THREAD_WATCHING_READ_METHOD, {}),
+          );
+          next = new Map(Object.entries(parsed.threads));
+        } catch (error) {
+          if (
+            error instanceof RpcError &&
+            error.code === "host/rejected" &&
+            "hostCode" in error.details &&
+            error.details.hostCode === -32601
+          ) {
+            this.watchingSupported = false;
+            next = new Map();
+          } else {
+            return;
+          }
+        }
+        if (this.closed) return;
+        const previous = this.watching;
+        const changedIds = new Set<string>();
+        for (const id of new Set([...previous.keys(), ...next.keys()])) {
+          if (JSON.stringify(previous.get(id) ?? null) !== JSON.stringify(next.get(id) ?? null)) {
+            changedIds.add(id);
+          }
+        }
+        this.watching = next;
+        for (const id of changedIds) {
+          const value = next.get(id) ?? null;
+          const log = this.threads.view(id)?.log;
+          if (log) log.setProjection("codexhostWatching", value);
+          else if (this.controls.size > 0) {
+            const seq = this.threads.reserveDroppedProjectionSeq(id);
+            if (seq !== undefined) {
+              for (const sink of this.controls)
+                sink.push({
+                  type: "projection",
+                  sessionId: id,
+                  key: "codexhostWatching",
+                  value,
+                  seq,
+                });
+            }
+          }
+        }
+        if (publishDelta && this.publishedCatalog && changedIds.size > 0) {
+          const updatedRows: ChThread[] = [];
+          for (const id of changedIds) {
+            const row = this.rows.get(id);
+            if (!row || !this.publishedCatalog.has(id)) continue;
+            const key = this.catalogKey(row);
+            if (this.publishedCatalog.get(id) === key) continue;
+            this.publishedCatalog.set(id, key);
+            updatedRows.push(row);
+          }
+          for (const row of updatedRows) {
+            this.events.emit("api-session/added", await this.summary(row));
+          }
+        }
+      } while (!this.closed && this.watchingSupported && this.watchingDirty);
+    };
+    this.refreshingWatching = run().finally(() => {
+      this.refreshingWatching = undefined;
+    });
+    await this.refreshingWatching;
+  }
+
   private catalogKey(row: ChThread): string {
     return JSON.stringify([
       threadListTitle(row),
@@ -554,6 +643,7 @@ export class ChSessions {
       row.canAcceptDirectInput !== false,
       row.codexhostImportSource ?? null,
       this.threads.harnessId(row.id),
+      this.watching.get(row.id) ?? null,
     ]);
   }
   private catalogProjections(row: ChThread) {
@@ -562,6 +652,7 @@ export class ChSessions {
       threadTreeParent: this.tree.parent(row.id),
       archiveForkParent: this.archiveForkParent(row),
       codexhostImportSource: row.codexhostImportSource ?? null,
+      codexhostWatching: this.watching.get(row.id) ?? null,
     };
   }
   private async publishCatalogChanges(pageSectionAdditions?: ReadonlySet<string>): Promise<void> {
@@ -717,6 +808,7 @@ export class ChSessions {
       view = history;
       view.log.setProjection("threadReference", { hostId: "local" });
       view.log.setProjection("threadTreeParent", this.tree.parent(id));
+      view.log.setProjection("codexhostWatching", this.watching.get(id) ?? null);
       if (this.images) {
         view.log.setProjection("attachmentInput", this.files ? WEB_FILE_INPUT : WEB_IMAGE_INPUT);
         view.log.setProjection("imageLimits", WEB_IMAGE_LIMITS);
@@ -889,6 +981,7 @@ export class ChSessions {
       "nativeInteractionError",
       "subagentCatalog",
       WEB_HANDOFF_PROJECTION,
+      "codexhostWatching",
       ...(row.parentThreadId ? ["subagent", "subagentTiming", "tokenUsage"] : []),
     ];
     const values = {
@@ -900,6 +993,7 @@ export class ChSessions {
       ...(this.handoffs.has(row.id) && !Object.hasOwn(projections, WEB_HANDOFF_PROJECTION)
         ? { [WEB_HANDOFF_PROJECTION]: this.handoffs.get(row.id) ?? null }
         : {}),
+      codexhostWatching: this.watching.get(row.id) ?? null,
       threadTreeParent: this.tree.parent(row.id),
       archiveForkParent: this.archiveForkParent(row),
       nativeDiscovery: !row.parentThreadId && row.canAcceptDirectInput !== false,
@@ -1454,7 +1548,7 @@ export class ChSessions {
         const id = this.id(sessionId);
         if (id.startsWith("draft-"))
           throw new RpcError("session/not-found", "Draft Session is no longer available.");
-        await Promise.all([this.tree.refresh(), this.refreshPins()]);
+        await Promise.all([this.tree.refresh(), this.refreshPins(), this.refreshWatching(false)]);
         const { thread, harnessId } = await this.readThread(id);
         this.rows.set(thread.id, thread);
         this.threads.setHarness(thread.id, harnessId);

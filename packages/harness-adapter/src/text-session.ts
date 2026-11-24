@@ -515,6 +515,12 @@ export interface SessionStateChangedEvent {
   state: HarnessSessionState;
 }
 
+/** Native background work (e.g. detached commands, wake observation) became active or settled. */
+export interface SessionBackgroundWorkChangedEvent {
+  type: "session.backgroundWork.changed";
+  active: boolean;
+}
+
 /** A display title from the native Session, available to an unnamed Host Thread. */
 export interface SessionTitleChangedEvent {
   type: "session.title.changed";
@@ -648,6 +654,7 @@ export interface SessionFaultedEvent {
 
 export type HostEvent =
   | SessionStateChangedEvent
+  | SessionBackgroundWorkChangedEvent
   | SessionTitleChangedEvent
   | SessionUsageChangedEvent
   | SessionAccountCreditsChangedEvent

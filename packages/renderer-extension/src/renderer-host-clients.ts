@@ -6,6 +6,7 @@ import {
   HARNESS_PREFERENCES_CHANGED_METHOD,
   HARNESS_DISPLAY_CHANGED_METHOD,
   SKILLS_CHANGED_METHOD,
+  THREAD_WATCHING_UPDATED_METHOD,
 } from "@codexhost/shared-contracts";
 import {
   createRendererModelClient,
@@ -78,6 +79,7 @@ export function createRendererHostClients(
                   !(typeof methods === "string" ? [methods] : methods).some((method) =>
                     [
                       THREAD_USAGE_UPDATED_METHOD,
+                      THREAD_WATCHING_UPDATED_METHOD,
                       HARNESS_PREFERENCES_CHANGED_METHOD,
                       HARNESS_DISPLAY_CHANGED_METHOD,
                       SKILLS_CHANGED_METHOD,
@@ -103,6 +105,7 @@ export function createRendererHostClients(
                     !("method" in message) ||
                     ![
                       THREAD_USAGE_UPDATED_METHOD,
+                      THREAD_WATCHING_UPDATED_METHOD,
                       HARNESS_PREFERENCES_CHANGED_METHOD,
                       HARNESS_DISPLAY_CHANGED_METHOD,
                       SKILLS_CHANGED_METHOD,

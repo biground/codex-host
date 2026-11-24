@@ -290,6 +290,7 @@ export const harnessSessionStateSchema = z.custom<HarnessSessionState>((value) =
 
 const eventKeys = new Map<string, ReadonlySet<string>>([
   ["session.state.changed", new Set(["type", "state"])],
+  ["session.backgroundWork.changed", new Set(["type", "active"])],
   ["session.usage.changed", new Set(["type", "usage", "observedForTurnId"])],
   ["usage.request", new Set(["type", "request"])],
   ["usage.request.timing", new Set(["type", "turnId", "timing"])],
@@ -484,6 +485,7 @@ export const harnessOutputSchema = z.custom<HarnessOutput>((value) => {
     if (!strictKeys(event, eventKeys.get(String(event?.type)))) return false;
     if (event.type === "session.state.changed")
       return harnessSessionStateSchema.safeParse(event.state).success;
+    if (event.type === "session.backgroundWork.changed") return typeof event.active === "boolean";
     if (event.type === "item.background.started")
       return (
         hostTurnIdSchema.safeParse(event.turnId).success &&

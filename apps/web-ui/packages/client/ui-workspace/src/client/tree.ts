@@ -20,6 +20,13 @@ import {
 
 import { buildThreadTree, type ThreadTreeInfo } from "./thread-tree.ts";
 
+/** Watching summary projected by the shared Host while a Thread awaits children or background tasks. */
+export interface SessionWatchingState {
+  watchCount: number;
+  watchTargets?: readonly string[];
+  backgroundWork: boolean;
+}
+
 /** Only the shared external catalog advertises this capability; absence is unsupported. */
 declare module "@deepseek-ai/dsh-session-projection/types" {
   interface SessionProjectionMap {
@@ -35,6 +42,7 @@ declare module "@deepseek-ai/dsh-session-projection/types" {
       workspaceFiles?: boolean;
       officePreview?: boolean;
     } | null;
+    codexhostWatching: SessionWatchingState | null;
   }
 }
 
@@ -76,6 +84,8 @@ export interface SessionNode {
   /** A Session-scoped UI consumer is awaiting this user. */
   pendingInteraction?: SessionPendingInteractionStatus;
   running: boolean;
+  /** Session is idle on the foreground turn while waiting on watched child sessions or background tasks. */
+  watching?: SessionWatchingState;
   /** Running direct children in the loaded subagent catalog. */
   runningSubagentCount: number;
   /** Finished running while not selected and not yet opened (the green "done" reminder dot). */
@@ -122,6 +132,8 @@ export interface SearchResultNode {
   /** A Session-scoped UI consumer is awaiting this user. */
   pendingInteraction?: SessionPendingInteractionStatus;
   running: boolean;
+  /** Session is idle on the foreground turn while waiting on watched child sessions or background tasks. */
+  watching?: SessionWatchingState;
   /** Running direct children in the loaded subagent catalog. */
   runningSubagentCount: number;
   /** Finished running while not selected and not yet opened (the green "done" reminder dot). */
@@ -422,16 +434,34 @@ function runningChildCount(
   );
 }
 
+function watchingOf(
+  summary: SessionSummary,
+  list: SessionListState,
+): SessionWatchingState | undefined {
+  const live = list.projectionsBySession[summary.id]?.values;
+  const value =
+    live !== undefined && Object.hasOwn(live, "codexhostWatching")
+      ? live.codexhostWatching
+      : summary.projectionValues?.codexhostWatching;
+  if (value == null) return undefined;
+  return value.watchCount > 0 || value.backgroundWork ? value : undefined;
+}
+
 /** Existing list/status facts shared by sidebar and visit-only navigation, without opening a Session. */
 export function sessionActivity(
   summary: SessionSummary,
   list: SessionListState,
   statuses: SessionStatuses,
-): Pick<SessionNode, "pendingInteraction" | "running" | "runningSubagentCount" | "completed"> {
+): Pick<
+  SessionNode,
+  "pendingInteraction" | "running" | "watching" | "runningSubagentCount" | "completed"
+> {
   const status = statuses.get(summary.id);
   const pendingInteraction = visiblePendingKind(status?.pendingInteraction?.kind);
+  const watching = watchingOf(summary, list);
   return {
     running: status?.running ?? summary.running,
+    ...(watching === undefined ? {} : { watching }),
     runningSubagentCount: runningChildCount(list, summary.id, statuses),
     completed: status?.completionUnread === true,
     ...(pendingInteraction === undefined ? {} : { pendingInteraction }),
@@ -731,6 +761,7 @@ export function deriveSearchResults(
       const match = contentBySession.get(summary.id);
       const status = statuses.get(summary.id);
       const pendingInteraction = visiblePendingKind(status?.pendingInteraction?.kind);
+      const watching = watchingOf(summary, list);
       const parentId = threadTreeParentOf(summary, list);
       return {
         id: summary.id,
@@ -743,6 +774,7 @@ export function deriveSearchResults(
             }),
         remote: summary.projectionValues?.remoteHost ?? undefined,
         running: status?.running ?? summary.running,
+        ...(watching === undefined ? {} : { watching }),
         runningSubagentCount: runningChildCount(list, summary.id, statuses),
         ...(pendingInteraction === undefined ? {} : { pendingInteraction }),
         completed: status?.completionUnread === true,

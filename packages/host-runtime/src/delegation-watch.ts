@@ -1,6 +1,6 @@
 import { randomUUID } from "node:crypto";
 
-import { formatThreadWatchNotice } from "@codexhost/shared-contracts";
+import { formatThreadWatchNotice, THREAD_WATCHING_TARGETS_MAX } from "@codexhost/shared-contracts";
 
 import {
   DEFAULT_WATCH_TIMEOUT_MS,
@@ -176,6 +176,7 @@ export class DelegationWatchService {
   readonly #ready: Promise<void>;
   readonly #watches: Watch[] = [];
   readonly #cancelling = new Map<string, number>();
+  readonly #changeListeners = new Set<() => void>();
   #writes: Promise<void> = Promise.resolve();
   #timer: ReturnType<typeof setTimeout> | undefined;
   #ticking = false;
@@ -280,8 +281,38 @@ export class DelegationWatchService {
         `Could not persist Thread watch: ${error instanceof Error ? error.message : String(error)}`,
       );
     }
+    this.#notifyChanged();
     this.#schedule();
     return { ...result, state: "watching" };
+  }
+
+  subscribeChanges(listener: () => void): () => void {
+    this.#changeListeners.add(listener);
+    return () => {
+      this.#changeListeners.delete(listener);
+    };
+  }
+
+  watchingBySubscriber(): ReadonlyMap<string, { watchCount: number; watchTargets: string[] }> {
+    const grouped = new Map<string, { watchCount: number; watchTargets: string[] }>();
+    for (const watch of this.#watches) {
+      if (watch.state !== "watching" && watch.state !== "pendingDelivery") continue;
+      if (originClientName(watch.notifyThreadId) !== undefined) continue;
+      let entry = grouped.get(watch.notifyThreadId);
+      if (!entry) {
+        entry = { watchCount: 0, watchTargets: [] };
+        grouped.set(watch.notifyThreadId, entry);
+      }
+      entry.watchCount += 1;
+      const label = watch.title?.trim() || watch.threadId;
+      if (
+        entry.watchTargets.length < THREAD_WATCHING_TARGETS_MAX &&
+        !entry.watchTargets.includes(label)
+      ) {
+        entry.watchTargets.push(label);
+      }
+    }
+    return grouped;
   }
 
   async watches(): Promise<ThreadWatchListResult> {
@@ -400,7 +431,10 @@ export class DelegationWatchService {
     this.#nudgePending = false;
     if (this.#timer) clearTimeout(this.#timer);
     this.#timer = undefined;
+    const hadWatches = this.#watches.length > 0;
     this.#watches.length = 0;
+    if (hadWatches) this.#notifyChanged();
+    this.#changeListeners.clear();
   }
 
   async #restore(store: DelegationWatchStore): Promise<void> {
@@ -431,7 +465,10 @@ export class DelegationWatchService {
       if (record.delivering || watch.state !== record.state) void this.#persist(watch);
     }
     this.#trimUndeliverable();
-    if (records.length > 0) this.#diagnose(`restored ${records.length} watch(es) after a restart`);
+    if (records.length > 0) {
+      this.#diagnose(`restored ${records.length} watch(es) after a restart`);
+      this.#notifyChanged();
+    }
     this.#schedule();
   }
 
@@ -500,7 +537,9 @@ export class DelegationWatchService {
       const turnId = snapshot.turn?.turnId;
       const crossedRestart = watch.crossedRestart === true;
       delete watch.crossedRestart;
+      const previousTitle = watch.title;
       if (snapshot.title) watch.title = snapshot.title;
+      if (watch.title !== previousTitle) this.#notifyChanged();
       watch.harnessId = snapshot.harnessId;
       if (snapshot.refs?.length) watch.refs = snapshot.refs;
       if (terminal(snapshot.status)) {
@@ -578,6 +617,7 @@ export class DelegationWatchService {
     } catch (error) {
       const failure = deliveryFailure(error);
       const message = error instanceof Error ? error.message : String(error);
+      let changed = false;
       for (const watch of pending) {
         delete watch.delivering;
         // A rejected send is retried and never treated as delivered.
@@ -587,10 +627,12 @@ export class DelegationWatchService {
             failure === "unknown"
               ? `Delivery outcome unknown; the notification may already have started a Turn, so it is not retried (${message})`
               : message;
+          changed = true;
         }
         void this.#persist(watch);
       }
       this.#trimUndeliverable();
+      if (changed) this.#notifyChanged();
     }
   }
 
@@ -676,8 +718,21 @@ export class DelegationWatchService {
 
   #remove(watch: Watch): void {
     const index = this.#watches.indexOf(watch);
-    if (index >= 0) this.#watches.splice(index, 1);
+    if (index >= 0) {
+      this.#watches.splice(index, 1);
+      this.#notifyChanged();
+    }
     void this.#write((store) => store.remove(watch.id));
+  }
+
+  #notifyChanged(): void {
+    for (const listener of [...this.#changeListeners]) {
+      try {
+        listener();
+      } catch (error) {
+        this.#diagnose(error);
+      }
+    }
   }
 
   #trimUndeliverable(): void {

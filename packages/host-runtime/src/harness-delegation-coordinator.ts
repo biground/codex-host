@@ -189,6 +189,7 @@ export class HarnessDelegationCoordinator {
   readonly #officialThreadMetadata: (threadId: string) => Promise<ParentMetadata>;
   readonly #activeOfficialParents: () => string[];
   readonly #externalThreadBusy: (thread: ExternalThread) => boolean;
+  readonly #externalBackgroundBusy: (thread: ExternalThread) => boolean;
   readonly #pendingQuestions: (threadId: string) => DelegationPendingQuestion[];
 
   constructor(input: {
@@ -224,6 +225,7 @@ export class HarnessDelegationCoordinator {
     officialThreadMetadata(threadId: string): Promise<ParentMetadata>;
     activeOfficialParents(): string[];
     externalThreadBusy(thread: ExternalThread): boolean;
+    externalBackgroundBusy?(thread: ExternalThread): boolean;
     pendingQuestions(threadId: string): DelegationPendingQuestion[];
   }) {
     this.#adapters = input.adapters;
@@ -246,6 +248,7 @@ export class HarnessDelegationCoordinator {
     this.#officialThreadMetadata = input.officialThreadMetadata;
     this.#activeOfficialParents = input.activeOfficialParents;
     this.#externalThreadBusy = input.externalThreadBusy;
+    this.#externalBackgroundBusy = input.externalBackgroundBusy ?? (() => false);
     this.#pendingQuestions = input.pendingQuestions;
   }
 
@@ -703,7 +706,9 @@ export class HarnessDelegationCoordinator {
     const { thread, historyFresh } = await this.#resolveExternalThread(threadId, undefined, {
       touch: false,
     });
-    if (!this.#externalThreadBusy(thread) && !historyFresh) {
+    const foregroundBusy = this.#externalThreadBusy(thread);
+    const backgroundBusy = this.#externalBackgroundBusy(thread);
+    if (!foregroundBusy && !backgroundBusy && !historyFresh) {
       const error = await this.#externalRuntime.refresh(thread);
       if (error?.code === -32075) throw externalThreadError(error);
       // A Harness that died cannot serve its native history, but the Host already
@@ -725,7 +730,7 @@ export class HarnessDelegationCoordinator {
           (includeLiveItems ? projector?.snapshotTurn() : projector?.pendingTurn()) ?? {},
         ]
       : thread.turns;
-    return { kind: "loaded" as const, thread, turns, busy: this.#externalThreadBusy(thread) };
+    return { kind: "loaded" as const, thread, turns, busy: foregroundBusy || backgroundBusy };
   }
 
   /**

@@ -219,8 +219,13 @@ import {
   THREAD_TREE_SNAPSHOT_METHOD,
   THREAD_TREE_UNWATCH_METHOD,
   THREAD_TREE_WATCH_METHOD,
+  THREAD_WATCHING_READ_METHOD,
+  THREAD_WATCHING_UPDATED_METHOD,
   threadTreeWatchResultSchema,
+  threadWatchingReadResultSchema,
+  threadWatchingUpdatedNotificationSchema,
   type ThreadTreeSnapshot,
+  type ThreadWatchingReadResult,
 } from "@codexhost/shared-contracts";
 
 function isRecord(value: unknown): value is Record<string, unknown> {
@@ -260,6 +265,8 @@ export type NativeInferenceTarget = ThreadInspectionParams | { cwd: string };
 
 export interface RendererModelClient extends Partial<RendererSessionImportClient> {
   watchThreadTree?(receive: (snapshot: ThreadTreeSnapshot) => void): () => void;
+  readThreadWatching?(): Promise<ThreadWatchingReadResult>;
+  subscribeThreadWatching?(listener: (snapshot: ThreadWatchingReadResult) => void): () => void;
   hasDesktopThread?(id: string): Promise<boolean>;
   getHarnessPreferences?(scope?: string): Promise<HarnessPreferenceSnapshot>;
   patchHarnessPreferences?(input: HarnessPreferencePatch): Promise<HarnessPreferenceSnapshot>;
@@ -604,6 +611,30 @@ export function createRendererModelClient(
       );
     },
     watchThreadTree,
+    async readThreadWatching(): Promise<ThreadWatchingReadResult> {
+      try {
+        const result = await manager.sendRequest(THREAD_WATCHING_READ_METHOD, {});
+        return threadWatchingReadResultSchema.parse(result);
+      } catch (error) {
+        if (error instanceof RendererMethodUnavailableError) {
+          return { threads: {} };
+        }
+        throw error;
+      }
+    },
+    subscribeThreadWatching(listener: (snapshot: ThreadWatchingReadResult) => void): () => void {
+      return (
+        notificationTarget(source)?.addNotificationCallback?.(
+          THREAD_WATCHING_UPDATED_METHOD,
+          (notification) => {
+            if (!isRecord(notification) || notification.method !== THREAD_WATCHING_UPDATED_METHOD)
+              return;
+            const parsed = threadWatchingUpdatedNotificationSchema.safeParse(notification.params);
+            if (parsed.success) listener(parsed.data);
+          },
+        ) ?? (() => {})
+      );
+    },
     async hasDesktopThread(threadId: string) {
       const result = await manager.sendRequest("thread/read", { threadId, includeTurns: false });
       return isRecord(result) && isRecord(result.thread) && result.thread.id === threadId;

@@ -858,6 +858,11 @@ export function installCurrentRendererAdapter(): {
       usageSubscription.subscribe(listener),
     listThreadOwnership: (input: ThreadOwnershipListParams) =>
       currentModelClient().listThreadOwnership(input),
+    readThreadWatching: () =>
+      currentModelClient().readThreadWatching?.() ?? Promise.resolve({ threads: {} }),
+    subscribeThreadWatching: (
+      listener: Parameters<NonNullable<RendererModelClient["subscribeThreadWatching"]>>[0],
+    ) => currentModelClient().subscribeThreadWatching?.(listener) ?? (() => {}),
     selectThreadModel: (input: ThreadModelSelectParams) =>
       currentModelClient().selectThreadModel(input),
     selectThreadThinking: (input: ThreadThinkingSelectParams) =>

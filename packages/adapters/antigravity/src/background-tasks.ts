@@ -60,6 +60,7 @@ export interface AntigravityBackgroundTasksOptions {
   pollIntervalMs?: number;
   emit(event: HostEvent): void;
   onTaskFinished?(info: { taskId: string; stepIndex: number }): void;
+  onRunningChange?(): void;
 }
 
 function isRecord(value: unknown): value is Record<string, unknown> {
@@ -387,11 +388,19 @@ export class AntigravityBackgroundTasks {
   #timer: ReturnType<typeof setInterval> | undefined;
   #refreshing: Promise<void> | undefined;
   #stopped = false;
+  #wasRunning = false;
 
   constructor(private readonly options: AntigravityBackgroundTasksOptions) {}
 
   get running(): boolean {
     return this.#tasks.size > 0;
+  }
+
+  #syncRunning(): void {
+    const active = this.running;
+    if (active === this.#wasRunning) return;
+    this.#wasRunning = active;
+    this.options.onRunningChange?.();
   }
 
   track(task: DetachedAntigravityTask): void {
@@ -407,6 +416,7 @@ export class AntigravityBackgroundTasks {
       completed: false,
     };
     this.#tasks.set(task.taskId, tracked);
+    this.#syncRunning();
     if (!this.#timer) {
       this.#timer = setInterval(() => {
         void this.refresh();
@@ -440,6 +450,7 @@ export class AntigravityBackgroundTasks {
       this.#complete(tracked, outcome, outcome.status === "succeeded" ? 0 : 1);
     }
     this.#tasks.clear();
+    this.#syncRunning();
   }
 
   stop(): void {
@@ -656,5 +667,6 @@ export class AntigravityBackgroundTasks {
       turnId: tracked.task.turnId,
       snapshot: { item: completedItem, outcome },
     });
+    this.#syncRunning();
   }
 }

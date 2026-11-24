@@ -120,6 +120,7 @@ import {
   BrowserSidebarAgentIconDom,
   SIDEBAR_THREAD_ROW_SELECTOR,
 } from "./renderer-sidebar-agent-icons.js";
+import { installRendererSidebarWatching } from "./renderer-sidebar-watching.js";
 import {
   rendererHarnessCommandExecutesDirectly,
   routeRendererHarnessCommandSelection,
@@ -962,6 +963,20 @@ export function installRendererBindingProbe(
     },
     getLocalAgent: localAgentForSidebarThread,
   });
+  const sidebarWatching = installRendererSidebarWatching({
+    getClient: (hostId) => modelClientForHost(hostId),
+    getKnownHostIds: () => {
+      const ids = new Set<string>(["local", ...(modelControl?.knownHostIds?.() ?? [])]);
+      for (const mounted of mountedByComposer.values()) {
+        if (mounted.hostId) ids.add(mounted.hostId);
+      }
+      return [...ids];
+    },
+    getLocale: () => settingsLifecycle.locale,
+    onWatchingChange: () => {
+      for (const mounted of mountedByComposer.values()) renderMounted(mounted);
+    },
+  });
   const stopSidebarClosures = observeRemoteSidebarClosures(
     window,
     sidebarAgentIcons.remoteThreadClosed,
@@ -1005,6 +1020,7 @@ export function installRendererBindingProbe(
       openRendererThread(threadId, { hostId: hostId ?? "local", signal }),
     onLocaleChange() {
       widgets.syncLocale();
+      sidebarWatching.syncLocale();
       for (const mounted of mountedByComposer.values()) renderMounted(mounted);
     },
   });
@@ -1252,6 +1268,9 @@ export function installRendererBindingProbe(
       controller.isCurrentModelRequest(mounted.composer, catalogRequest.generation);
     const handoffAvailable = composerHandoffAvailable(mounted.composer);
     mounted.handoffAvailable = handoffAvailable;
+    const threadId = threadIdFromComposerModelTarget(mounted.modelTarget);
+    const watchingHostId = mounted.hostId ?? activeModelHostId(mounted.composer);
+    const watching = sidebarWatching.getWatching(watchingHostId, threadId);
     const externalSubmissionReady = renderComposerAgentControl(
       mounted.control,
       controller.get(mounted.composer),
@@ -1267,6 +1286,7 @@ export function installRendererBindingProbe(
       mounted.ownershipStatus === "error",
       mounted.accountBalance,
       handoffAvailable,
+      watching,
     );
     const nativeTargetResolved =
       mounted.modelTarget?.[0] === "default" || mounted.modelTarget?.[0] === "conversation";
@@ -3238,7 +3258,10 @@ export function installRendererBindingProbe(
       renderMounted(mounted);
       void loadThreadOwnership(mounted);
     }
-    if (changed) sidebarAgentIcons.refresh();
+    if (changed) {
+      sidebarAgentIcons.refresh();
+      sidebarWatching.refresh();
+    }
   };
 
   function reconcileHarnessAvailabilityHost(retryDraftUsage = false): void {
@@ -3292,7 +3315,10 @@ export function installRendererBindingProbe(
       }
     }
     // A reconnect can replace the client without changing the Composer's Host ID.
-    if (connectionsChanged) sidebarAgentIcons.refresh();
+    if (connectionsChanged) {
+      sidebarAgentIcons.refresh();
+      sidebarWatching.refresh();
+    }
     const hostId = activeModelHostId();
     if (
       !hostId ||
@@ -4316,6 +4342,7 @@ export function installRendererBindingProbe(
       disposeSkillReferences();
       stopSidebarClosures();
       sidebarAgentIcons.dispose();
+      sidebarWatching.dispose();
       sidebarThreadState.dispose();
       nativeScheduleControls.dispose();
       settingsLifecycle.dispose();

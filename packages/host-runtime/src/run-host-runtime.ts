@@ -457,6 +457,8 @@ export async function runHostRuntime(input: {
               ...shared,
               ...installedHarnessPluginOptions(delegationEnvironment, false, input.hostRuntimeUrl),
               onDelegationApi,
+              watchingSubscribers: () => registry.watchingBySubscriber(),
+              onWatchesChanged: (listener) => registry.subscribeChanges(listener),
               ...announcementOptions,
               ...(updateCoordinator ? { updateCoordinator } : {}),
               ...(consoleOpener ? { consoleOpener } : {}),
@@ -483,6 +485,8 @@ export async function runHostRuntime(input: {
             ...installedHarnessPluginOptions(delegationEnvironment, false, input.hostRuntimeUrl),
             mappingStore,
             closeMappingStoreOnExit: false,
+            watchingSubscribers: () => registry.watchingBySubscriber(),
+            onWatchesChanged: (listener: () => void) => registry.subscribeChanges(listener),
             ...announcementOptions,
             ...(updateCoordinator ? { updateCoordinator } : {}),
             ...(consoleOpener ? { consoleOpener } : {}),
@@ -603,6 +607,8 @@ export async function runHostRuntime(input: {
           sharedDelegation = api;
           return registry.register(api, { harnessCatalog: true });
         },
+        watchingSubscribers: () => registry.watchingBySubscriber(),
+        onWatchesChanged: (listener) => registry.subscribeChanges(listener),
       });
       const externalRunning = externalHost.run();
       const sharedListener = createRemoteAppServerWebSocketListener({

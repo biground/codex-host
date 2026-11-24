@@ -11,6 +11,7 @@ import type {
   CodexAccountSummary,
   HarnessPluginDescriptor,
   ThreadUsageSnapshot,
+  ThreadWatchingEntry,
 } from "@codexhost/shared-contracts";
 import {
   CONTROL_ATTRIBUTE,
@@ -48,6 +49,11 @@ import {
   mountRendererComposerIndicators,
   type RendererComposerIndicators,
 } from "./renderer-composer-indicators.js";
+import {
+  COMPOSER_WATCHING_ATTRIBUTE,
+  mountRendererComposerWatching,
+  type RendererComposerWatching,
+} from "./renderer-composer-watching.js";
 import type { RendererSettingsLocale } from "./settings/localization.js";
 import type { RendererAdapterStatus } from "./versioned-renderer-adapter.js";
 import { isOrbitComposer } from "./renderer-composer-kind.js";
@@ -103,6 +109,7 @@ export interface ComposerAgentControl {
   nativePermissionModeControlVerified: boolean;
   credits: RendererCreditsControl;
   composerIndicators: RendererComposerIndicators;
+  watching: RendererComposerWatching;
   usage: RendererUsageControl | null;
   composerId: string;
   harnessCommands: RendererHarnessCommandControl;
@@ -138,6 +145,7 @@ function isOwnedRendererControl(element: Element): boolean {
     element.hasAttribute("data-codexhost-usage-control") ||
     element.hasAttribute("data-codexhost-credits-control") ||
     element.hasAttribute("data-codexhost-composer-indicators") ||
+    element.hasAttribute(COMPOSER_WATCHING_ATTRIBUTE) ||
     element.hasAttribute("data-codexhost-harness-command-control") ||
     element.hasAttribute("data-codexhost-handoff-control")
   );
@@ -660,6 +668,30 @@ function setNativeControlHidden(
   state.element.setAttribute("aria-hidden", "true");
 }
 
+function refreshWatchingPlacement(control: ComposerAgentControl): void {
+  const permissionElement = control.nativePermissionModeControlVerified
+    ? (control.nativePermissionModeControl?.element ?? null)
+    : null;
+  if (permissionElement?.parentElement) {
+    const afterIndicators =
+      control.composerIndicators?.root.parentElement === permissionElement.parentElement
+        ? control.composerIndicators.root
+        : permissionElement;
+    control.watching?.place(permissionElement.parentElement, afterIndicators.nextSibling);
+    return;
+  }
+  const modelRoot = control.modelPicker?.root;
+  if (modelRoot?.parentElement) {
+    control.watching?.place(modelRoot.parentElement, modelRoot);
+    return;
+  }
+  if (control.root.parentElement) {
+    control.watching?.place(control.root.parentElement, control.root);
+    return;
+  }
+  control.watching?.place(control.composer instanceof HTMLElement ? control.composer : null, null);
+}
+
 export function reconcileComposerNativeControls(
   control: ComposerAgentControl,
   hideModel: boolean,
@@ -679,6 +711,7 @@ export function reconcileComposerNativeControls(
       ? (control.nativePermissionModeControl?.element ?? null)
       : null,
   );
+  refreshWatchingPlacement(control);
   setNativeControlHidden(control.nativeModelControl, hideModel);
   // Context usage is shared by Codex and external Harnesses. External Usage
   // data is projected into the same native Codex indicator, so it must remain
@@ -738,6 +771,7 @@ export function mountComposerAgentControl(
   );
   const credits = mountRendererCreditsControl(composerId);
   const composerIndicators = mountRendererComposerIndicators(composer);
+  const watching = mountRendererComposerWatching(composer);
 
   const toolbar = sendButton.parentElement;
   const harnessCommands = mountRendererHarnessCommandControl(
@@ -797,6 +831,7 @@ export function mountComposerAgentControl(
     nativePermissionModeControlVerified,
     credits,
     composerIndicators,
+    watching,
     usage: null,
     harnessCommands,
     sendButton,
@@ -839,6 +874,7 @@ export function renderComposerAgentControl(
   ownershipError = false,
   accountBalance: AccountBalanceSnapshot | null = null,
   handoffAvailable = false,
+  watching: ThreadWatchingEntry | null = null,
 ): boolean {
   if (control.usage === null) {
     control.usage = mountRendererUsageControl(control.composerId, locale);
@@ -917,6 +953,7 @@ export function renderComposerAgentControl(
     permissionModeVisible ? (usage?.composerIndicators ?? []) : [],
     locale,
   );
+  control.watching?.render(watching, locale);
   if (control.usage) {
     renderRendererUsageControl(control.usage, usage, locale);
   }
@@ -939,6 +976,7 @@ export function disposeComposerAgentControl(control: ComposerAgentControl): void
   restoreNativeControl(control.nativeContextUsageControl);
   restoreNativeControl(control.nativePermissionModeControl);
   control.composerIndicators?.dispose();
+  control.watching?.dispose();
   control.credits.dispose();
   control.usage?.dispose();
   control.usage = null;

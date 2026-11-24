@@ -166,6 +166,23 @@ export {
   SIDEBAR_THREAD_ROW_SELECTOR,
 } from "./renderer-sidebar-agent-icons.js";
 export type { RendererSidebarContractInspection } from "./renderer-sidebar-agent-icons.js";
+export {
+  BrowserSidebarWatchingDom,
+  BrowserSidebarWatchingRow,
+  installRendererSidebarWatching,
+  SIDEBAR_WATCHING_ATTRIBUTE,
+} from "./renderer-sidebar-watching.js";
+export type {
+  RendererSidebarWatching,
+  SidebarWatchingDom,
+  SidebarWatchingRow,
+} from "./renderer-sidebar-watching.js";
+export {
+  COMPOSER_WATCHING_ATTRIBUTE,
+  mountRendererComposerWatching,
+} from "./renderer-composer-watching.js";
+export type { RendererComposerWatching } from "./renderer-composer-watching.js";
+export { rendererWatchingBadgeText, rendererWatchingTooltip } from "./renderer-watching-format.js";
 export type {
   ExternalModelControlView,
   ExternalPermissionModeControlView,

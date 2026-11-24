@@ -163,3 +163,18 @@ it("validates rate-limit and quota-exhausted HarnessError payloads", () => {
     }).success,
   ).toBe(false);
 });
+
+it("validates session.backgroundWork.changed events", () => {
+  const accepts = (event: Record<string, unknown>) =>
+    harnessOutputSchema.safeParse({ kind: "event", event }).success;
+
+  expect(accepts({ type: "session.backgroundWork.changed", active: true })).toBe(true);
+  expect(accepts({ type: "session.backgroundWork.changed", active: false })).toBe(true);
+  for (const invalid of [
+    { type: "session.backgroundWork.changed" },
+    { type: "session.backgroundWork.changed", active: "true" },
+    { type: "session.backgroundWork.changed", active: true, extra: 1 },
+  ]) {
+    expect(accepts(invalid), JSON.stringify(invalid)).toBe(false);
+  }
+});

@@ -513,6 +513,15 @@ export function SearchResultItem({
         {!result.archived && primaryStatus.state !== "idle" && (
           <span className={css.timeStatus} data-session-status={primaryStatus.state}>
             <SessionStatusDots statuses={statuses} />
+            {primaryStatus.trailingLabel !== undefined && (
+              <span
+                className={primaryStatus.watching ? css.watchingBadge : undefined}
+                data-session-watching={primaryStatus.watching ? "true" : undefined}
+                aria-hidden="true"
+              >
+                {primaryStatus.trailingLabel}
+              </span>
+            )}
           </span>
         )}
         {result.archived && (
@@ -785,7 +794,13 @@ export function SessionNodeItem({
                   <>
                     <SessionStatusDots statuses={statuses} />
                     {primaryStatus.trailingLabel !== undefined && (
-                      <span aria-hidden="true">{primaryStatus.trailingLabel}</span>
+                      <span
+                        className={primaryStatus.watching ? css.watchingBadge : undefined}
+                        data-session-watching={primaryStatus.watching ? "true" : undefined}
+                        aria-hidden="true"
+                      >
+                        {primaryStatus.trailingLabel}
+                      </span>
                     )}
                   </>
                 ) : (

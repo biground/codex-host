@@ -6,9 +6,12 @@ import { runInNewContext } from "node:vm";
 import { WebSocketServer } from "ws";
 import type { ChHostClient, ChPinChange, ChProjectSnapshot } from "../../src/ch-host-client.ts";
 import type { ChThread } from "../../src/ch-thread-view.ts";
+import { RpcError } from "../../src/transport.ts";
 import {
   THREAD_ARCHIVE_CONFIRM_METHOD,
+  THREAD_WATCHING_READ_METHOD,
   decodeHarnessPluginRoute,
+  type ThreadWatchingEntry,
 } from "@codexhost/shared-contracts";
 
 export class FakeChHost implements ChHostClient {
@@ -16,6 +19,8 @@ export class FakeChHost implements ChHostClient {
   readonly threads = new Map<string, ChThread>();
   readonly archivedIds = new Set<string>();
   readonly modes = new Map<string, string>();
+  watching: Record<string, ThreadWatchingEntry> = {};
+  watchingErrorCode: number | undefined;
   readonly projectSnapshot: ChProjectSnapshot = { projects: [], assignments: {}, projectless: [] };
   async projects(): Promise<ChProjectSnapshot> {
     return structuredClone(this.projectSnapshot);
@@ -109,6 +114,14 @@ export class FakeChHost implements ChHostClient {
     switch (method) {
       case "codexhost/thread/tree/read":
         value = { parents: {} };
+        break;
+      case THREAD_WATCHING_READ_METHOD:
+        if (this.watchingErrorCode !== undefined) {
+          throw new RpcError("host/rejected", "Watching method is unavailable", {
+            hostCode: this.watchingErrorCode,
+          });
+        }
+        value = { threads: structuredClone(this.watching) };
         break;
       case "codexhost/workspace/read":
         value = { ...structuredClone(this.projectSnapshot), pinned: [...this.pinnedIds] };

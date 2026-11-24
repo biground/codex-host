@@ -64,6 +64,15 @@ export const en = {
   "connection.error": "Could not sync messages. Retry the connection.",
   "opening.loading": "Opening conversation…",
   "opening.error": "Could not open conversation",
+  "watching.badge": "Watching",
+  "watching.listSeparator": ", ",
+  "watching.detail.children": "Waiting on {n} sub-sessions; will resume automatically when done",
+  "watching.detail.childrenTargets":
+    "Waiting on {n} sub-sessions ({targets}); will resume automatically when done",
+  "watching.detail.background":
+    "Background command running; will wake and resume automatically when done",
+  "watching.detail.both":
+    "Waiting on {n} sub-sessions and a background command; will resume automatically when done",
   "connection.checking": "Checking the connection…",
   "connection.computer": "Cannot reach your computer. Check that it is on and Web is running.",
   "connection.lastSynced": "Last synced at {time}",
@@ -983,6 +992,12 @@ export const zh: Record<ImportLocaleKey, string> = {
   "connection.error": "消息同步失败，请重试连接。",
   "opening.loading": "正在打开会话…",
   "opening.error": "无法打开会话",
+  "watching.badge": "监听中",
+  "watching.listSeparator": "、",
+  "watching.detail.children": "正在监听 {n} 个子会话，完成后自动继续",
+  "watching.detail.childrenTargets": "正在监听 {n} 个子会话（{targets}），完成后自动继续",
+  "watching.detail.background": "后台命令运行中，完成后自动唤醒继续",
+  "watching.detail.both": "正在监听 {n} 个子会话并等待后台命令完成，完成后自动继续",
   "connection.checking": "正在检查连接…",
   "connection.computer": "无法连接到电脑，请确认电脑已开机且 Web 正在运行。",
   "connection.lastSynced": "上次同步于 {time}",

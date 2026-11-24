@@ -10,11 +10,33 @@ interface SessionStatus {
   state: StateDotState;
   label: string;
   trailingLabel?: string;
+  watching?: true;
 }
 
-/** Pending interaction is primary; live activity outranks completion reminders. */
+function watchingLabel(watching: NonNullable<SessionNode["watching"]>, t: RowTranslate): string {
+  if (watching.watchCount > 0 && watching.backgroundWork) {
+    return t("status.watching.both", { n: watching.watchCount });
+  }
+  if (watching.watchCount > 0) {
+    const targets = watching.watchTargets?.filter((item) => item.trim().length > 0) ?? [];
+    if (targets.length > 0) {
+      return t("status.watching.childrenTargets", {
+        n: watching.watchCount,
+        targets: targets.join(t("archive.confirm.listSeparator")),
+      });
+    }
+    return t("status.watching.children", { n: watching.watchCount });
+  }
+  if (watching.backgroundWork) return t("status.watching.background");
+  return t("status.watching");
+}
+
+/** Pending interaction is primary; live activity outranks watching and completion reminders. */
 export function sessionStatuses(
-  node: Pick<SessionNode, "pendingInteraction" | "running" | "runningSubagentCount" | "completed">,
+  node: Pick<
+    SessionNode,
+    "pendingInteraction" | "running" | "watching" | "runningSubagentCount" | "completed"
+  >,
   t: RowTranslate,
 ): readonly [SessionStatus, ...SessionStatus[]] {
   const subagents: SessionStatus | undefined =
@@ -61,6 +83,15 @@ export function sessionStatuses(
   if (node.running) {
     const primary: SessionStatus = { state: "ongoing", label: t("status.running") };
     return subagents === undefined ? [primary] : [primary, subagents];
+  }
+  if (node.watching && (node.watching.watchCount > 0 || node.watching.backgroundWork)) {
+    const watching: SessionStatus = {
+      state: "ongoing",
+      label: watchingLabel(node.watching, t),
+      trailingLabel: t("status.compact.watching"),
+      watching: true,
+    };
+    return subagents === undefined ? [watching] : [watching, subagents];
   }
   if (subagents !== undefined) return [subagents];
   if (node.completed) return [{ state: "done", label: t("status.completed") }];

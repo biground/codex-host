@@ -110,6 +110,7 @@ export type {
   ReadThreadSnapshotInput,
   ResumeSessionInput,
   RollbackLastTurnSessionInput,
+  SessionBackgroundWorkChangedEvent,
   SessionFaultedEvent,
   SessionStateChangedEvent,
   SessionTitleChangedEvent,

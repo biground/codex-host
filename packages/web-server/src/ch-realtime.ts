@@ -1,4 +1,5 @@
 import type { HostClientUpdate } from "@codexhost/desktop-control";
+import { THREAD_WATCHING_UPDATED_METHOD } from "@codexhost/shared-contracts";
 import type { ChHostClient } from "./ch-host-client.ts";
 
 const DEFAULT_DEBOUNCE_MS = 100;
@@ -41,6 +42,7 @@ export class ChRealtime {
     private readonly callbacks: {
       thread: (id: string) => Promise<unknown>;
       usage: (id: string) => void;
+      watching?: () => void;
       catalog: (reason?: "hello" | "changed") => Promise<void>;
       archived?: (id: string, archived: boolean) => void;
       connection: (online: boolean) => void;
@@ -81,12 +83,17 @@ export class ChRealtime {
     }
     if (event.type === "hello") {
       this.callbacks.reset(event.cursor.epoch, event.reset);
+      this.callbacks.watching?.();
       for (const id of this.watched.keys()) this.schedule(id, DEFAULT_DEBOUNCE_MS);
       if (!this.dirty.has("")) this.catalogReason = "hello";
       this.schedule("", DEFAULT_DEBOUNCE_MS);
     } else if (event.type === "projects-changed") {
       this.schedule("", DEFAULT_DEBOUNCE_MS);
     } else if (event.type === "changed") {
+      if (event.method === THREAD_WATCHING_UPDATED_METHOD) {
+        if (this.online) this.callbacks.watching?.();
+        return;
+      }
       if (
         event.method === "codexhost/thread/usage/updated" ||
         event.method === "thread/tokenUsage/updated"

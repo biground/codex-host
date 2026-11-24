@@ -174,6 +174,8 @@ export async function runSharedHostService(
             delegation = api;
             return registry.register(api, { harnessCatalog: true });
           },
+          watchingSubscribers: () => registry.watchingBySubscriber(),
+          onWatchesChanged: (listener) => registry.subscribeChanges(listener),
         });
         const running = host.run();
         let stopping = false;

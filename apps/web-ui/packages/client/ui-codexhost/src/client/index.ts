@@ -49,6 +49,7 @@ import type {} from "@deepseek-ai/dsh-api-session-controller/client";
 import { SessionHarnessIcon } from "./SessionHarnessIcon.tsx";
 import { HostConnectionStatus } from "./HostConnectionStatus.tsx";
 import { SessionOpeningNotice } from "./SessionOpeningNotice.tsx";
+import { SessionWatchingNotice } from "./SessionWatchingNotice.tsx";
 import { HostUsageDock } from "./HostUsageDock.tsx";
 import type {
   ComposerAttachment,
@@ -654,6 +655,17 @@ export function apply(ctx: ClientContext): void {
         inject: () => ({ navigation: ctx.uiWorkspace }),
       },
       SessionOpeningNotice,
+    ),
+  );
+  ctx.slots.inject("conversation.header.notice", () =>
+    ctx.slots.register(
+      {
+        name: "conversation.header.notice",
+        id: "codexhost.session-watching",
+        locale: NS,
+        inject: () => ({ list: ctx.sessions.list }),
+      },
+      SessionWatchingNotice,
     ),
   );
   ctx.slots.inject("conversation.composer.dock", () =>

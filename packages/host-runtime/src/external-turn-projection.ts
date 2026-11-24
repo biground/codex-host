@@ -137,6 +137,7 @@ export type TurnScopedEvent = Exclude<
   {
     type:
       | "session.state.changed"
+      | "session.backgroundWork.changed"
       | "session.title.changed"
       | "session.usage.changed"
       | "session.accountCredits.changed"
@@ -205,6 +206,7 @@ export interface ExternalTurnProjectionHost {
   setThreadStatus(thread: ExternalThread, status: ExternalThreadStatus): Promise<void>;
   signalActiveWorkChanged(): void;
   hasRunningSubagents(parentThreadId: string): boolean;
+  hasBackgroundWork(thread: ExternalThread): boolean;
   publishExternalQueue(threadId: string): Promise<void>;
   startNextQueuedExternalTurn(thread: ExternalThread): Promise<void>;
 }
@@ -367,12 +369,16 @@ export class ExternalTurnProjection {
         thread.record.hostThreadId,
       );
       if (delegation) {
+        const backgroundActive =
+          projection.projector.hasOpenDetachedTool() || this.#host.hasBackgroundWork(thread);
         const status =
           result.completedTurn.status === "failed"
             ? "failed"
             : result.completedTurn.status === "interrupted"
               ? "interrupted"
-              : "completed";
+              : backgroundActive
+                ? "running"
+                : "completed";
         await this.#host.repository.setDelegationStatus(delegation.delegationId, status);
       }
     }

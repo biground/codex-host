@@ -33,6 +33,7 @@ export interface AntigravityWakeObserverOptions {
   streamedIntoPrompt?(startedAtMs: number | undefined): boolean;
   publish(snapshot: HostTurnSnapshot): void;
   onExpectedWakeTimeout?(info: { stepIndex: number; taskId?: string }): void;
+  onObservingChange?(observing: boolean): void;
 }
 
 /** Idle ACP updates have no response/stop boundary or native Turn identity.
@@ -48,6 +49,7 @@ export class AntigravityWakeObserver {
   #work: Promise<void> | undefined;
   #timer: NodeJS.Timeout | undefined;
   #closed = false;
+  #wasObserving = false;
 
   readonly #pollIntervalMs: number;
   readonly #commitWaitMs: number;
@@ -117,10 +119,21 @@ export class AntigravityWakeObserver {
     return this.#startRead();
   }
 
+  #syncObserving(): void {
+    const active = this.observing;
+    if (active === this.#wasObserving) return;
+    this.#wasObserving = active;
+    this.options.onObservingChange?.(active);
+  }
+
   #startRead(): Promise<void> {
-    return (this.#work = this.#read().finally(() => {
-      this.#work = undefined;
-    }));
+    const work = this.#read().finally(() => {
+      if (this.#work === work) this.#work = undefined;
+      this.#syncObserving();
+    });
+    this.#work = work;
+    this.#syncObserving();
+    return work;
   }
 
   async #read(): Promise<void> {
@@ -259,5 +272,6 @@ export class AntigravityWakeObserver {
     this.#sawNativeRunning = false;
     clearTimeout(this.#timer);
     this.#timer = undefined;
+    this.#syncObserving();
   }
 }

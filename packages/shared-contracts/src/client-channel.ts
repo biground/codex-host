@@ -8,6 +8,7 @@ import {
 } from "./host-extension-management.js";
 import { THREAD_ARCHIVE_CONFIRM_METHOD } from "./thread-archive-confirm.js";
 import { THREAD_HANDOFF_METHOD, threadHandoffMetadataSchema } from "./thread-handoff.js";
+import { THREAD_WATCHING_READ_METHOD } from "./thread-watching.js";
 
 /** Authenticated local owner channel. Notifications invalidate state; they are
  * NOT appendable transcript deltas. Clients reconcile absolute snapshots. */
@@ -56,6 +57,7 @@ export const CLIENT_CHANNEL_METHODS = [
   "project/delete",
   "project/move",
   "codexhost/thread/tree/read",
+  THREAD_WATCHING_READ_METHOD,
   "codexhost/thread/pins/list",
   "codexhost/thread/sections/list",
   "codexhost/thread/sections/move",

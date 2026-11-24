@@ -817,6 +817,14 @@ export class DelegationControlRegistry implements DelegationControlApi, Delegati
     return this.#watchService.watches();
   }
 
+  watchingBySubscriber(): ReadonlyMap<string, { watchCount: number; watchTargets: string[] }> {
+    return this.#watchService.watchingBySubscriber();
+  }
+
+  subscribeChanges(listener: () => void): () => void {
+    return this.#watchService.subscribeChanges(listener);
+  }
+
   /** Stops watching in this process; stored watches resume in the next Runtime. */
   close(): void {
     this.#watchService.close();
