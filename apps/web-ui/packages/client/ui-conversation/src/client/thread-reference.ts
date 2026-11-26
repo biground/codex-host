@@ -13,6 +13,18 @@ export interface ThreadReference {
   title: string;
 }
 
+const NORMALIZED_TITLE_CACHE_LIMIT = 2048;
+const normalizedTitleCache = new Map<string, string>();
+
+function normalizeThreadReferenceTitle(raw: string): string {
+  const cached = normalizedTitleCache.get(raw);
+  if (cached !== undefined) return cached;
+  const normalized = raw.replace(/[\s\u0000-\u001f\u007f]+/gu, " ").trim();
+  if (normalizedTitleCache.size >= NORMALIZED_TITLE_CACHE_LIMIT) normalizedTitleCache.clear();
+  normalizedTitleCache.set(raw, normalized);
+  return normalized;
+}
+
 export function threadReferenceOf(session: {
   id: string;
   blank: boolean;
@@ -30,7 +42,8 @@ export function threadReferenceOf(session: {
     threadId: reference.threadId ?? session.id,
     hostId: reference.hostId,
     title:
-      session.title?.replace(/[\s\u0000-\u001f\u007f]+/gu, " ").trim() || session.id.slice(0, 8),
+      (session.title === undefined ? "" : normalizeThreadReferenceTitle(session.title)) ||
+      session.id.slice(0, 8),
   };
 }
 
