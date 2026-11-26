@@ -359,7 +359,6 @@ export class AntigravityToolTracker {
     const state = this.#tools.get(toolCallId);
     return state &&
       !state.snapshot &&
-      !state.detached &&
       !state.backgroundTaskDetached &&
       state.item?.type === "toolExecution"
       ? state.item.itemId

@@ -95,6 +95,8 @@ class FakeTransport implements AntigravityAcpTransportLike {
     this.eventHandler = handler;
   }
 
+  setSessionInteractionHandler = vi.fn();
+
   openSession = vi.fn(async (input: AntigravityOpenAcpSessionInput) => {
     this.sessionId = input.sessionId ?? randomUUID();
     return {
@@ -126,6 +128,10 @@ class FakeTransport implements AntigravityAcpTransportLike {
       return callResult.promise;
     },
   );
+
+  steer = vi.fn(async (): Promise<AntigravityPromptResult> => ({
+    stopReason: "end_turn",
+  }));
 
   cancel = vi.fn(async () => {});
 

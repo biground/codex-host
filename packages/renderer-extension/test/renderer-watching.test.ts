@@ -70,6 +70,7 @@ function createWatchingClient(initial: ThreadWatchingReadResult): {
   let current = initial;
   const client: RendererModelClient = {
     forkThread: vi.fn(),
+    handoffThread: vi.fn(),
     inspectHarness: vi.fn(),
     inspectThread: vi.fn(),
     inspectHarnessCommands: vi.fn(),

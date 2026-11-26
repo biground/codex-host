@@ -363,6 +363,7 @@ export class AntigravitySession implements HarnessSession {
   readonly #backgroundTasks: AntigravityBackgroundTasks;
   readonly #localRecoveredSteps = new Set<number>();
   #recoveredWatermark = -1;
+  #recoveryChecking = false;
   #recovering = false;
   #lastBackgroundWork = false;
   #state: HarnessSessionState = {};
@@ -684,7 +685,7 @@ export class AntigravitySession implements HarnessSession {
           },
           publish: (snapshot) => this.#emit({ type: "turn.autonomous.completed", snapshot }),
           onExpectedWakeTimeout: () => {
-            void this.#maybeRecoverDanglingBackgroundTask();
+            void this.#maybeRecoverDanglingBackgroundTask(true);
           },
           onObservingChange: () => this.#syncBackgroundWork(),
         });
@@ -723,6 +724,7 @@ export class AntigravitySession implements HarnessSession {
       }
       if (!this.#configurationQueue) this.#publishState();
       if (
+        ref &&
         !this.#closed &&
         !this.#faulted &&
         !this.#active &&
@@ -1988,7 +1990,7 @@ export class AntigravitySession implements HarnessSession {
   #recoveredSteps(nativeSessionId: string): Set<number> {
     return this.#options.recoveredStepsFor?.(nativeSessionId) ?? this.#localRecoveredSteps;
   }
-  async #maybeRecoverDanglingBackgroundTask(): Promise<void> {
+  async #maybeRecoverDanglingBackgroundTask(holdBackgroundWork = false): Promise<void> {
     if (
       this.#closed ||
       this.#faulted ||
@@ -1996,6 +1998,7 @@ export class AntigravitySession implements HarnessSession {
       this.#configurationQueue ||
       this.#historyOperation ||
       this.#backgroundTasks.running ||
+      this.#recoveryChecking ||
       this.#recovering ||
       !this.#transport
     ) {
@@ -2003,8 +2006,11 @@ export class AntigravitySession implements HarnessSession {
     }
     const ref = this.nativeRef;
     if (!ref) return;
-    this.#recovering = true;
-    this.#syncBackgroundWork();
+    this.#recoveryChecking = true;
+    if (holdBackgroundWork) {
+      this.#recovering = true;
+      this.#syncBackgroundWork();
+    }
     try {
       const home = antigravityHome(this.#options.environment);
       const dangling = await findDanglingBackgroundTaskCompletion(home, ref.nativeSessionId);
@@ -2024,6 +2030,8 @@ export class AntigravitySession implements HarnessSession {
       if (dangling.stepIndex <= this.#recoveredWatermark || recovered.has(dangling.stepIndex)) {
         return;
       }
+      this.#recovering = true;
+      this.#syncBackgroundWork();
       const status = await readNativeConversationStatus(home, ref.nativeSessionId);
       if (
         this.#closed ||
@@ -2068,8 +2076,11 @@ export class AntigravitySession implements HarnessSession {
       this.#emit({ type: "turn.started", turnId });
       await this.#runTurn(turn, command, false);
     } finally {
-      this.#recovering = false;
-      this.#syncBackgroundWork();
+      this.#recoveryChecking = false;
+      if (this.#recovering) {
+        this.#recovering = false;
+        this.#syncBackgroundWork();
+      }
     }
   }
   handleTransportFault(error: AntigravityTransportError): void {
