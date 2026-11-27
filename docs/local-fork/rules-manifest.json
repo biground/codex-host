@@ -1,0 +1,100 @@
+{
+  "branch": "fork/codex-biground-ver",
+  "renamedFrom": "fork/agy-background-wake",
+  "upstreamBase": "v0.28.1",
+  "sourceCodeCommit": "14030cda9c10c0f4c97fc0a86e7e38681223854d",
+  "capturedAt": "2026-11-27T06:51:29.255Z",
+  "normalization": "UTF-8 without BOM; LF line endings; one terminal newline. Source hashes preserve original bytes.",
+  "files": [
+    {
+      "path": "docs/local-fork/workspace-AGENTS.md",
+      "bytes": 12042,
+      "sha256": "ea5f17fb3d772230607ebc6dbb26a47d2b74f92440572932d8301e35ecce9d47",
+      "sourceSha256": "ea5f17fb3d772230607ebc6dbb26a47d2b74f92440572932d8301e35ecce9d47"
+    },
+    {
+      "path": "docs/local-fork/global-AGENTS.md",
+      "bytes": 21040,
+      "sha256": "16d36e9501480e05afada4ad3092cc75f521299a25dfc8766ea191792c46f4b8",
+      "sourceSha256": "7fa84cc4fbeec93b47b6a3c2664a6dab9eefce511ca243fd649b2aae19f1e968"
+    },
+    {
+      "path": "docs/local-fork/build-and-apply-agy-background-wake.mjs",
+      "bytes": 8433,
+      "sha256": "5ed83289fa5326a129f36bc51f01227abc1fae0062be14b545f992bc8725906b",
+      "sourceSha256": "5ed83289fa5326a129f36bc51f01227abc1fae0062be14b545f992bc8725906b"
+    },
+    {
+      "path": ".agents/skills/ponytail/SKILL.md",
+      "bytes": 6637,
+      "sha256": "1316a2f3f95741d2300b116fe0c2d81ce4a9568656ed0a62643f54aaf09957f2",
+      "sourceSha256": "46a57e26a2632e7fa40eae6a3cf3011ccdc4d8db19d8f8617907d6b5deef055e"
+    },
+    {
+      "path": ".agents/skills/grill-me/SKILL.md",
+      "bytes": 5937,
+      "sha256": "f3815d07d5db934f9d0cdb6ccbf5a2c3884cb2e2ea552d4206c07a9c97f7bf0c",
+      "sourceSha256": "f3815d07d5db934f9d0cdb6ccbf5a2c3884cb2e2ea552d4206c07a9c97f7bf0c"
+    },
+    {
+      "path": ".agents/skills/codexhost-delegation/SKILL.md",
+      "bytes": 3275,
+      "sha256": "112f34807620f49b327f32d34345c100f9bea5515602acdc71592f7021c0ebf4",
+      "sourceSha256": "112f34807620f49b327f32d34345c100f9bea5515602acdc71592f7021c0ebf4"
+    },
+    {
+      "path": ".agents/skills/test-driven-development/SKILL.md",
+      "bytes": 6974,
+      "sha256": "614084f89bbef350a7da0e8b381d8dda390208ab3035e3c794499e8f01d02af9",
+      "sourceSha256": "614084f89bbef350a7da0e8b381d8dda390208ab3035e3c794499e8f01d02af9"
+    },
+    {
+      "path": ".agents/skills/test-driven-development/testing-anti-patterns.md",
+      "bytes": 8251,
+      "sha256": "bde453bc258f06543987477c837939afaa774ea2acbd9f308d702fc452bc4283",
+      "sourceSha256": "bde453bc258f06543987477c837939afaa774ea2acbd9f308d702fc452bc4283"
+    },
+    {
+      "path": ".agents/skills/systematic-debugging/SKILL.md",
+      "bytes": 9003,
+      "sha256": "8ea2b01e3262f88ca336a890fd3cc36e374151b6cc94e33a668bef8a026ba1b8",
+      "sourceSha256": "8ea2b01e3262f88ca336a890fd3cc36e374151b6cc94e33a668bef8a026ba1b8"
+    },
+    {
+      "path": ".agents/skills/verification-before-completion/SKILL.md",
+      "bytes": 2221,
+      "sha256": "280070d0c72f1959fe72321d7d2d83496f82b561a8d17c98867e8c63cdfdb03b",
+      "sourceSha256": "280070d0c72f1959fe72321d7d2d83496f82b561a8d17c98867e8c63cdfdb03b"
+    },
+    {
+      "path": ".agents/skills/humanizer-zh/.gitignore",
+      "bytes": 41,
+      "sha256": "e52aac198acd71945e1730f45cafba41fffda4e2a0d7d6a38175880aae8eabea",
+      "sourceSha256": "e52aac198acd71945e1730f45cafba41fffda4e2a0d7d6a38175880aae8eabea"
+    },
+    {
+      "path": ".agents/skills/humanizer-zh/LICENSE",
+      "bytes": 1063,
+      "sha256": "aa00e74769e1b9d8e7fa7094dbfcca9b129a0ded6dce1cf4da050b99146d2fa7",
+      "sourceSha256": "aa00e74769e1b9d8e7fa7094dbfcca9b129a0ded6dce1cf4da050b99146d2fa7"
+    },
+    {
+      "path": ".agents/skills/humanizer-zh/README.md",
+      "bytes": 7799,
+      "sha256": "60cd3ed8b4753837ca8f8fcebf6076a38591a269d91ea1791aa7448e5a1b1b58",
+      "sourceSha256": "60cd3ed8b4753837ca8f8fcebf6076a38591a269d91ea1791aa7448e5a1b1b58"
+    },
+    {
+      "path": ".agents/skills/humanizer-zh/SKILL.md",
+      "bytes": 1420,
+      "sha256": "2af03477bccf842632bfb6dc138a92c36f86d63223a38ef09e0e855b580290d6",
+      "sourceSha256": "2af03477bccf842632bfb6dc138a92c36f86d63223a38ef09e0e855b580290d6"
+    },
+    {
+      "path": ".agents/skills/humanizer-zh/references/editing-examples.md",
+      "bytes": 15632,
+      "sha256": "d76423ce3e78afe6d313d2de22517114d8220811e65263d4686c4d7fae825885",
+      "sourceSha256": "d76423ce3e78afe6d313d2de22517114d8220811e65263d4686c4d7fae825885"
+    }
+  ]
+}
