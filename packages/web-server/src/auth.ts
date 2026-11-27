@@ -33,8 +33,8 @@ export interface RequestAuth {
   /** Owner of this request's connections and push subscriptions. */
   readonly credential: string;
   readonly local: boolean;
-  /** Full access (local/primary token) vs policy-scoped secondary key. */
-  readonly scope: "full" | "scoped";
+  /** Full access (local/primary token, default when omitted) vs policy-scoped secondary key. */
+  readonly scope?: "full" | "scoped";
   /** Present when `scope === "scoped"`. */
   readonly policy?: WebAccessPolicy;
   /** Keep this response alive through a revocation it caused, so it can report the result. */
@@ -254,7 +254,7 @@ export class AccessAuth {
       this.policies?.trackRequest(request, {
         credential: auth.credential,
         local: auth.local,
-        scope: auth.scope,
+        scope: resolved.scope,
         ...(auth.policy !== undefined ? { policy: auth.policy } : {}),
       });
       return auth;
@@ -297,7 +297,7 @@ export class AccessAuth {
     this.policies?.trackRequest(request, {
       credential: auth.credential,
       local: auth.local,
-      scope: auth.scope,
+      scope: resolved.scope,
       ...(auth.policy !== undefined ? { policy: auth.policy } : {}),
     });
     return auth;

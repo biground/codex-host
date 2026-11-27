@@ -292,6 +292,7 @@ describe("Renderer watching client, sidebar rows, and composer pill", () => {
         null,
         false,
         null,
+        false,
         { watchCount: 1, watchTargets: ["Worker"], backgroundWork: false },
       );
       const codexPill = composer.querySelector<HTMLElement>(`[${COMPOSER_WATCHING_ATTRIBUTE}]`);
@@ -323,6 +324,7 @@ describe("Renderer watching client, sidebar rows, and composer pill", () => {
         null,
         false,
         null,
+        false,
         { watchCount: 0, backgroundWork: true },
       );
       const agyPill = composer.querySelector<HTMLElement>(`[${COMPOSER_WATCHING_ATTRIBUTE}]`);
@@ -345,6 +347,7 @@ describe("Renderer watching client, sidebar rows, and composer pill", () => {
         null,
         false,
         null,
+        false,
         null,
       );
       expect(agyPill?.hidden).toBe(true);
